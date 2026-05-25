@@ -34,6 +34,6 @@ Restore from the backup path printed by the installer, or restore the SG1 v4 fol
 
 Original base project: StargateProject SG1 software from the BuildAStargate/Jordan/Kristian/Jonnerd project lineage.
 
-Additional source/idea credit: DHD behavior comes from the original StargateProject hardware/software lineage; packaging by Marcin/Codex.
+Additional source/idea credit: DHD behavior comes from the original StargateProject hardware/software lineage; packaging by matelv-x/Codex.
 
 How much is copied or changed: Small helper package.
