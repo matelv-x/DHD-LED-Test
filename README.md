@@ -1,17 +1,19 @@
 # DHD Test
 
-Adds DHD LED browser test controls and backend test modes.
+DHD test helper package from the final-patches folder.
 
 This repository is private while it is being checked and verified.
 
 ## Install
 
+Clone or unzip this add-on into `/home/pi`, then run:
+
 ```bash
-cd /home/pi/Stargate-Final_Patches
+cd /home/pi
 rm -rf DHD-Test
 git clone https://github.com/matelv-x/DHD-Test.git
 cd DHD-Test
-chmod +x *.sh
+chmod +x install.sh
 sudo ./install.sh /home/pi/sg1_v4
 sudo systemctl restart stargate.service
 ```
@@ -19,24 +21,19 @@ sudo systemctl restart stargate.service
 ## Restore / uninstall
 
 ```bash
-cd /home/pi/Stargate-Final_Patches/DHD-Test
-chmod +x restore.sh
-sudo ./restore.sh /home/pi/sg1_v4
-sudo systemctl restart stargate.service
+Restore from the backup path printed by the installer, or restore the SG1 v4 folder from a known-good backup.
 ```
 
 ## What it changes
 
-- Adds DHD ON/OFF and LED test controls to the debug page.
-- Adds DHD test modes such as center, brightness, gradient, chase and strobe.
-- Keeps firmware out of this package; this only patches the Pi software.
+- Adds DHD test files under `test/`.
+- Installer targets `/home/pi/sg1_v4`.
+- Use current `DHD_Test.zip` version, not old `dhd_test.v1.zip`.
 
 ## Attribution and originality
 
 Original base project: StargateProject SG1 software from the BuildAStargate/Jordan/Kristian/Jonnerd project lineage.
 
-Additional source/idea credit: Built around the original DHD hardware/software behavior from the Kristian/Jonnerd StargateProject lineage.
+Additional source/idea credit: DHD behavior comes from the original StargateProject hardware/software lineage; packaging by Marcin/Codex.
 
-How much is copied or changed: Medium patch. It modifies selected debug, keyboard and runtime files; it is not a firmware package.
-
-The included `*.patch` file, when present, shows the exact text-level changes against the base software used while packaging.
+How much is copied or changed: Small helper package.
