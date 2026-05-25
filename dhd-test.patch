@@ -1,0 +1,3172 @@
+diff -ruN original/classes/StargateMilkyWay/stargate.py upgraded/classes/StargateMilkyWay/stargate.py
+--- original/classes/StargateMilkyWay/stargate.py	2026-05-14 20:20:25
++++ upgraded/classes/StargateMilkyWay/stargate.py	2026-05-11 01:51:22
+@@ -1,395 +1,681 @@
+-from threading import Thread
+-from time import time, sleep
+-from random import randrange
+-
+-from symbol_manager import StargateSymbolManager
+-from chevrons import ChevronManager
+-from dialers import Dialer
+-from keyboard_manager import KeyboardManager
+-from symbol_ring import SymbolRing
+-from stargate_address_manager import StargateAddressManager
+-import subspace_messages
+-from subspace_client import SubspaceClient
+-from wormhole_manager import WormholeManager
+-from subspace_server import SubspaceServer
+-from dialing_log import DialingLog
+-
+-class Stargate:
+-    """
+-    This is the class to create the stargate object itself.
+-    """
+-    def __init__(self, app):
+-
+-        self.app = app
+-        self.log = app.log
+-        self.cfg = app.cfg
+-        self.audio = app.audio
+-        self.electronics = app.electronics
+-        self.base_path = app.base_path
+-        self.net_tools = app.net_tools
+-        self.sw_updater = self.app.sw_updater
+-        self.schedule = app.schedule
+-        self.galaxy = app.galaxy
+-        self.galaxy_path = app.galaxy_path
+-
+-        self.log.log('Initializing Milky Way Stargate Software')
+-
+-        # Retrieve the configurations
+-        self.inactivity_timeout = self.cfg.get("dialing_timeout")
+-
+-        # Initialize the state variables
+-        self.running = True
+-        self.address_buffer_outgoing = [] #Storage buffer for dialed outgoing address
+-        self.address_buffer_incoming = [] #Storage buffer for dialed incoming address
+-        self.last_activity_time = None # A variable to store the last user input time
+-        self.centre_button_outgoing = False #A variable for the state of the centre button, outgoing.
+-        self.centre_button_incoming = False #A variable for the state of the centre button, incoming.
+-        self.locked_chevrons_outgoing = 0 # The current number of locked outgoing chevrons
+-        self.locked_chevrons_incoming = 0 # The current number of locked outgoing chevrons
+-        self.wormhole_active = False # The state of the wormhole.
+-        self.black_hole = False # Did we dial the black hole?
+-        self.fan_gate_online_status = True # To keep track of the dialed fan_gate status. Assume it's online until proven otherwise
+-        self.fan_gate_incoming_ip = None # To keep track of the IP address for the remote gate that establishes a wormhole
+-        self.connected_planet_name = None
+-        self.dhd_test = False
+-
+-        ### Set up the needed classes and make them ready to use ###
+-        self.symbol_manager = StargateSymbolManager(self.galaxy_path)
+-        self.subspace_client = SubspaceClient(self)
+-        self.addr_manager = StargateAddressManager(self)
+-        self.chevrons = ChevronManager(self)
+-        self.ring = SymbolRing(self)
+-        self.dialer = Dialer(self) # A "Dialer" is either a Keyboard or DHDv2
+-        self.keyboard = KeyboardManager(self, app.is_daemon)
+-        self.wh_manager = WormholeManager(self)
+-        self.wh_manager.initialize_animation_manager()
+-        self.dialing_log = DialingLog(self)
+-
+-        ### Run the stargate server if we have an internet connection ###
+-        # The stargate_server runs in it's own thread listening for incoming wormholes
+-
+-        # TODO move this into subspace client __init__
+-        if self.net_tools.has_internet_access():
+-            try:
+-                self.subspace_client_server_thread = Thread(target=SubspaceServer(self).start, daemon=True, args=())
+-                self.subspace_client_server_thread.start()
+-            except:
+-                self.log.log("Failed to start SubspaceServer thread")
+-                raise
+-
+-        ### Notify that the Stargate is ready
+-        self.audio.play_random_clip("startup")
+-        self.log.log('The Stargate is started and ready!')
+-
+-    def initialize_gate_state_vars(self):
+-        """
+-        This method resets the state variables to "gate idle"
+-        :return:
+-        """
+-        # Reset/initialize the state variables and address buffers
+-        self.address_buffer_outgoing = [] #Storage buffer for dialed outgoing address
+-        self.address_buffer_incoming = [] #Storage buffer for dialed incoming address
+-        self.last_activity_time = None # A variable to store the last user input time
+-        self.centre_button_outgoing = False #A variable for the state of the centre button, outgoing.
+-        self.centre_button_incoming = False #A variable for the state of the centre button, incoming.
+-        self.locked_chevrons_outgoing = 0 # The current number of locked outgoing chevrons
+-        self.locked_chevrons_incoming = 0 # The current number of locked outgoing chevrons
+-        self.wormhole_active = False # The state of the wormhole.
+-        self.black_hole = False # Did we dial the black hole?
+-        self.fan_gate_online_status = True # To keep track of the dialed fan_gate status. Assume it's online until proven otherwise
+-        self.fan_gate_incoming_ip = None # To keep track of the IP address for the remote gate that establishes a wormhole
+-        self.connected_planet_name = None
+-
+-    def update(self):
+-        """
+-        This is the main method to keep the stargate running and make decisions based on the manipulated objects variables.
+-        There are basically two main phases, the dialing phase and the wormhole phase.
+-        :return: Nothing is returned.
+-        """
+-        while self.running: # If we have not aborted
+-
+-            ### The Dialing phase###
+-            if not self.wormhole_active and self.running: # If we are in the dialing phase
+-
+-                ## Outgoing dialing ##
+-                self.outgoing_dialing()
+-
+-                ## Incoming dialing ##
+-                self.incoming_dialing()
+-
+-                ## Establishing wormhole ##
+-                self.establishing_wormhole()
+-
+-                ### Check for inactivity ###
+-                # If there are something in the buffers and no activity for 1 minute while dialing.
+-                # TODO: Use Schedule
+-                if self.inactivity( self.inactivity_timeout ):
+-                    self.log.log('Inactivity detected, aborting.')
+-                    self.shutdown()
+-
+-            ### The wormhole phase ###
+-            elif self.wormhole_active: # If wormhole
+-                self.ring.release() # Release the stepper motor.
+-                self.wh_manager.establish_wormhole() # This will establish the wormhole and keep it running until self.wormhole_active is False
+-                #When the wormhole is no longer running
+-                self.shutdown(cancel_sound=False)
+-
+-            self.schedule.run_pending() # Run any scheduled items
+-
+-            sleep(0.1) # Give the CPU a break (and yield to other threads)
+-
+-        # When the stargate is no longer running.
+-        self.shutdown(cancel_sound=False)
+-
+-
+-    def outgoing_dialing(self):
+-        """
+-        This method handles the outgoing dialing of the stargate. It's kept in it's own method so not to clutter up the update method too much.
+-        :return: Nothing is returned
+-        """
+-        if len(self.address_buffer_outgoing) > self.locked_chevrons_outgoing:
+-            self.ring.move_symbol_to_chevron(self.address_buffer_outgoing[self.locked_chevrons_outgoing], self.locked_chevrons_outgoing + 1)  # Dial the symbol
+-            self.locked_chevrons_outgoing += 1  # Increment the locked chevrons variable.
+-
+-            # If the gate shutdown requested, play the stop-dialing sound, and stop doing things.
+-            if not self.running:
+-                self.shutdown(cancel_sound=False, wormhole_fail_sound=True)
+-                sleep(0.5) # Time to allow the wormhole_fail_sound to finish
+-                return
+-
+-            try:
+-                self.chevrons.get(self.locked_chevrons_outgoing).cycle_outgoing()  # Do the chevron locking thing.
+-            except KeyError:  # If we dialed more chevrons than the stargate can handle.
+-                pass  # Just pass without activating a chevron.
+-
+-            try:
+-                self.log.log(f'Chevron {self.locked_chevrons_outgoing} locked with symbol: {self.address_buffer_outgoing[self.locked_chevrons_outgoing - 1]}')
+-            except IndexError:
+-                pass
+-            self.last_activity_time = time()  # update the last_activity_time
+-
+-            # TODO: Some of this belongs in Subspace. For example, deciding whether to send a message based
+-            #         on gate status should be handled by Subspace. outgoing_dialing() doesn't need to worry about that.
+-
+-            ## If we are dialing a fan_gate, send the symbols to the remote gate.
+-            if self.addr_manager.is_fan_made_stargate(self.address_buffer_outgoing):
+-                # If the gate is presumed to be online, send it.
+-                if self.fan_gate_online_status:
+-                    # send the locked symbols to the remote gate.
+-
+-                    this_gate_ip = self.addr_manager.get_ip_from_stargate_address(self.address_buffer_outgoing )
+-                    this_message = str( self.address_buffer_outgoing[0:self.locked_chevrons_outgoing] )
+-                    has_connection = self.subspace_client.send_to_remote_stargate( this_gate_ip, this_message)[0] # Attempt to send
+-
+-                    # Check for success
+-                    if has_connection:
+-                        self.log.log(f'Subspace Sent: {self.address_buffer_outgoing[0:self.locked_chevrons_outgoing]}')
+-
+-                        # Check if the recipient is busy. If so, stop sending subspace messages to it.
+-                        is_busy = self.subspace_client.get_status_of_remote_gate(this_gate_ip)
+-                        if is_busy:
+-                            self.log.log("The dialed Stargate is busy, can't establish a wormhole.")
+-                        self.fan_gate_online_status = not is_busy
+-
+-                    else:
+-                        self.log.log('This Gate is offline. Skipping Subspace sends for remainder of this dialing attempt.')
+-                        self.fan_gate_online_status = False # Gate is offline, don't keep sending messages during this dialing attempt
+-
+-    def incoming_dialing(self):
+-        """
+-        This method handles the incoming dialing of the stargate. It's kept in it's own method so not to clutter up the update method too much.
+-        :return: Nothing is returned
+-        """
+-
+-        # If there are dialed incoming symbols that are not yet locked and we are currently not dialing out.
+-        if len(self.address_buffer_incoming) > self.locked_chevrons_incoming and len(self.address_buffer_outgoing) == 0:
+-
+-            # If there are more than one unlocked symbol, add a short delay to avoid locking both symbols at once.
+-            if len(self.address_buffer_incoming) > self.locked_chevrons_incoming + 1:
+-                delay = randrange(1, 800) / 100  # Add a delay with some randomness
+-            else:
+-                delay = 0
+-
+-            # If we are still receiving the correct address to match the local stargate:
+-            buffer_first_6 = self.address_buffer_incoming[0:min(len(self.address_buffer_incoming), 6)] # get up to 6 symbols off incoming buffer
+-            local_first_6 = self.addr_manager.get_book().get_local_address()[0:min(len(self.address_buffer_incoming), 6)] # get up to 6 symbols off the local address_buffer_incoming
+-            loopback_first_6 = self.addr_manager.get_book().get_local_loopback_address()[0:min(len(self.address_buffer_incoming), 6)] # get up to 6 symbols off the loopback local address
+-
+-            # If the incoming address buffer matches our routable or unroutable local address, lock it.
+-            if buffer_first_6 in (local_first_6, loopback_first_6):
+-                self.log.log("Address matching. Incoming Buffer: " + str(self.address_buffer_incoming))
+-
+-                self.locked_chevrons_incoming += 1  # Increment the locked chevrons variable.
+-                try:
+-                    self.chevrons.get(self.locked_chevrons_incoming).incoming_on()  # Do the chevron locking thing.
+-                except KeyError:  # If we dialed more chevrons than the stargate can handle.
+-                    pass  # Just pass without activating a chevron.
+-
+-                # Play the audio clip for incoming wormhole for the first chevron
+-                if self.locked_chevrons_incoming == 1:
+-                    self.audio.play_random_clip("IncomingWormhole")
+-
+-                self.last_activity_time = time()  # update the last_activity_time
+-
+-                # Do the logging
+-                self.log.log(f'Incoming: Chevron {self.locked_chevrons_incoming} locked with symbol {self.address_buffer_incoming[self.locked_chevrons_incoming - 1]}')
+-
+-                sleep(delay)  # if there's a delay, use it.
+-            else:
+-                self.log.log("Address is not a match for this gate")
+-
+-    # TODO: Some of this belongs in Subspace.
+-    def try_sending_centre_button(self):
+-        """
+-        This functions simply checks if it is possible to send the centre_button to the remote gate and sends it.
+-        This method is used in the establishing_wormhole method.
+-        :return: Nothing is returned.
+-        """
+-        if  self.addr_manager.is_fan_made_stargate(self.address_buffer_outgoing) and \
+-            self.fan_gate_online_status and \
+-            self.centre_button_outgoing and \
+-            len(self.address_buffer_outgoing) == self.locked_chevrons_outgoing:
+-
+-            _ip_address = self.addr_manager.get_ip_from_stargate_address(self.address_buffer_outgoing )
+-            result = self.subspace_client.send_to_remote_stargate( _ip_address, subspace_messages.DIAL_CENTER_INCOMING )[0]
+-            if result:
+-                self.log.log('Sent: Center Button')
+-
+-    def get_connected_planet_name(self):
+-
+-        if self.wormhole_active == 'outgoing':
+-            return self.addr_manager.get_planet_name_by_address(self.address_buffer_outgoing)
+-        if self.wormhole_active == 'incoming':
+-            return self.addr_manager.get_planet_name_from_ip(self.fan_gate_incoming_ip)
+-        # Not connected
+-        return False
+-
+-    def establishing_wormhole(self):
+-        """
+-        This is the method that decides if we are to establish a wormhole or not
+-        :return: Nothing is returned, But the self.wormhole_active variable is changed if we can establish a wormhole.
+-        """
+-        ### Establishing wormhole ###
+-        ## Outgoing wormhole##
+-        # If the centre_button_outgoing is active and all dialed symbols are locked.
+-        if self.centre_button_outgoing and (0 < len(self.address_buffer_outgoing) == self.locked_chevrons_outgoing):
+-
+-            # Try to send the centre button to the fan_gate:
+-            self.try_sending_centre_button()
+-            # Try to establish a wormhole
+-            if self.possible_to_establish_wormhole():
+-
+-                self.ring.release() # Release the stepper to prevent overheating
+-
+-                # Update the state variables
+-                self.wormhole_active = 'outgoing'
+-                self.connected_planet_name = self.get_connected_planet_name()
+-
+-                # Log some stuff
+-                self.log.log('Valid address is locked')
+-                self.log.log(f'OUTGOING Wormhole to {self.connected_planet_name} established')
+-
+-                # Log the connection!
+-                self.dialing_log.established_outbound(self.address_buffer_outgoing)
+-
+-                # Check if we dialed a black hole planet
+-                if self.addr_manager.get_book().get_entry_by_address(self.address_buffer_outgoing[0:-1])['is_black_hole']:
+-                    self.log.log("Oh no! It's the black hole planet!")
+-                    self.black_hole = True
+-            else:
+-                # Log the dialing failure
+-                self.dialing_log.dialing_fail(self.address_buffer_outgoing)
+-                self.shutdown(cancel_sound=False, wormhole_fail_sound=True)
+-
+-        ## Incoming wormhole ##
+-        # If the centre_button_incoming is active and all dialed symbols are locked.
+-        elif self.centre_button_incoming and 0 < len(self.address_buffer_incoming) == self.locked_chevrons_incoming:
+-            # If the incoming wormhole matches the local address
+-            if self.address_buffer_incoming[0:-1] == self.addr_manager.get_book().get_local_address() or \
+-                self.address_buffer_incoming[0:-1] == self.addr_manager.get_book().get_local_loopback_address():
+-                # Update some state variables
+-                self.wormhole_active = 'incoming'  # Set the wormhole state to activate the wormhole.
+-                self.connected_planet_name = self.get_connected_planet_name()
+-                self.dialer.hardware.set_center_on() # Activate the centre_button light
+-
+-                self.log.log('Incoming address is a match!')
+-                self.log.log(f'INCOMING Wormhole from {self.connected_planet_name} established')
+-
+-                # Log the connection!
+-                # TODO: hook this up!
+-                #self.dialing_log.established_inbound( self.inbound_dialer)
+-
+-            else:
+-                self.log.log('Incoming address is NOT a match to Local Gate Address!')
+-                self.shutdown(cancel_sound=False, wormhole_fail_sound=True)
+-
+-
+-    def shutdown(self, cancel_sound=True, wormhole_fail_sound=False):
+-        """
+-        This method shuts down and resets the Stargate.
+-        :return:
+-        """
+-
+-        self.log.log('Shutting down the gate...')
+-
+-        # Play the cancel sound
+-        if cancel_sound:
+-            self.audio.sound_start('dialing_cancel')
+-
+-        # Play the wormhole fail sound
+-        if wormhole_fail_sound:
+-            self.audio.sound_start('dialing_fail')
+-
+-        # Turn off the chevrons
+-        self.chevrons.all_off()
+-
+-        # Turn off the DHD lights
+-        self.dialer.hardware.clear_lights()
+-
+-        # Release the stepper motor.
+-        self.ring.release()
+-
+-        # Put the gate back in to an idle state
+-        self.initialize_gate_state_vars()
+-
+-        self.dialing_log.shutdown()
+-
+-    def inactivity(self, seconds):
+-        """
+-        This functions checks if there has been more than the variable seconds of inactivity:
+-        :param seconds: The number of seconds of allowed inactivity
+-        :return: True if inactivity is detected, False if not
+-        """
+-
+-        # TODO: Use schedule
+-
+-        if not self.wormhole_active: #If we are in the dialing phase
+-            if self.last_activity_time: #If the variable is not None
+-                if (len(self.address_buffer_incoming) > 0) or (len(self.address_buffer_outgoing) > 0): # If there are something in the buffers
+-                    if (time() - self.last_activity_time) > seconds:
+-                        return True
+-        return False
+-
+-    def possible_to_establish_wormhole(self):
+-        """
+-        This is a method to help check if we are able to establish a wormhole or not.
+-        :return: Returns True if we can establish a wormhole, and False if not
+-        """
+-
+-        # TODO: Some of this belongs in Subspace.
+-
+-        # If the dialed address is valid
+-        if self.fan_gate_online_status and ( len(self.address_buffer_outgoing) > 0 and self.addr_manager.valid_planet(self.address_buffer_outgoing) or \
+-            len(self.address_buffer_incoming) > 0 and self.addr_manager.valid_planet(self.address_buffer_incoming) ):
+-            # If we dialed a fan_gate
+-            if self.addr_manager.valid_planet(self.address_buffer_outgoing) == 'fan_gate':
+-                # If the dialed fan_gate is not online
+-                if not self.fan_gate_online_status:
+-                    self.log.log('The dialed fan_gate is NOT online!')
+-                    return False
+-                # If the dialed fan_gate is already busy, with an active wormhole or outgoing dialing is in progress.
+-                if self.subspace_client.get_status_of_remote_gate(self.addr_manager.get_ip_from_stargate_address(self.address_buffer_outgoing )):
+-                    self.log.log('The dialed fan_gate is already busy!')
+-                    return False
+-            return True  # returns true if we can establish a wormhole
+-        return False  # returns false if we cannot establish a wormhole.
++from threading import Thread
++from time import time, sleep
++from random import randrange, sample
++
++from symbol_manager import StargateSymbolManager
++from chevrons import ChevronManager
++from dialers import Dialer
++from keyboard_manager import KeyboardManager
++from symbol_ring import SymbolRing
++from stargate_address_manager import StargateAddressManager
++import subspace_messages
++from subspace_client import SubspaceClient
++from wormhole_manager import WormholeManager
++from subspace_server import SubspaceServer
++from dialing_log import DialingLog
++from alarm_clock_manager import AlarmClockManager
++
++
++class Stargate:
++    """
++    This is the class to create the stargate object itself.
++    """
++    def __init__(self, app):
++
++        self.app = app
++        self.log = app.log
++        self.cfg = app.cfg
++        self.audio = app.audio
++        self.electronics = app.electronics
++        self.base_path = app.base_path
++        self.net_tools = app.net_tools
++        self.sw_updater = self.app.sw_updater
++        self.schedule = app.schedule
++        self.galaxy = app.galaxy
++        self.galaxy_path = app.galaxy_path
++
++        self.log.log('Initializing Milky Way Stargate Software')
++
++        # Retrieve the configurations
++        self.inactivity_timeout = self.cfg.get("dialing_timeout")
++
++        # Initialize the state variables
++        self.running = True
++        self.address_buffer_outgoing = [] #Storage buffer for dialed outgoing address
++        self.address_buffer_incoming = [] #Storage buffer for dialed incoming address
++        self.last_activity_time = None # A variable to store the last user input time
++        self.centre_button_outgoing = False #A variable for the state of the centre button, outgoing.
++        self.centre_button_incoming = False #A variable for the state of the centre button, incoming.
++        self.locked_chevrons_outgoing = 0 # The current number of locked outgoing chevrons
++        self.locked_chevrons_incoming = 0 # The current number of locked incoming chevrons
++        self.wormhole_active = False # The state of the wormhole.
++        self.black_hole = False # Did we dial the black hole?
++        self.fan_gate_online_status = True # To keep track of the dialed fan_gate status. Assume it's online until proven otherwise
++        self.fan_gate_incoming_ip = None # To keep track of the IP address for the remote gate that establishes a wormhole
++        self.fan_gate_incoming_name = None
++        self.fan_gate_incoming_address = None
++        self.connected_planet_name = None
++        self.dhd_test = False
++        self.extended_mode = False
++
++        # DHD incoming animation state
++        self.random_dhd_symbols = []
++        self.random_dhd_index = 0
++        self.random_dhd_active = False
++        self.random_dhd_last_time = 0
++        self.random_dhd_center_pending = False
++
++        # Visual symbols shown on DHD / HOME
++        self.incoming_visual_symbols = []
++
++        # Extended incoming sequence state
++        self.extended_sequence_stage = 0
++        self.extended_sequence_last_time = 0
++
++        ### Set up the needed classes and make them ready to use ###
++        self.symbol_manager = StargateSymbolManager(self.galaxy_path)
++        self.subspace_client = SubspaceClient(self)
++        self.addr_manager = StargateAddressManager(self)
++        self.chevrons = ChevronManager(self)
++        self.ring = SymbolRing(self)
++        self.dialer = Dialer(self) # A "Dialer" is either a Keyboard or DHDv2
++        self.keyboard = KeyboardManager(self, app.is_daemon)
++        self.wh_manager = WormholeManager(self)
++        self.wh_manager.initialize_animation_manager()
++        self.dialing_log = DialingLog(self)
++        self.alarm_clock = AlarmClockManager(self)
++
++        ### Run the stargate server for incoming wormholes.
++        # LAN gates must work even when Internet/Subspace is unavailable.
++        try:
++            self.subspace_client_server_thread = Thread(target=SubspaceServer(self).start, daemon=True, args=())
++            self.subspace_client_server_thread.start()
++        except:
++            self.log.log("Failed to start SubspaceServer thread")
++            raise
++
++        ### Notify that the Stargate is ready
++        self.audio.play_random_clip("startup")
++        self.log.log('The Stargate is started and ready!')
++
++    def initialize_gate_state_vars(self):
++        """
++        This method resets the state variables to "gate idle"
++        :return:
++        """
++        # Reset/initialize the state variables and address buffers
++        self.address_buffer_outgoing = [] #Storage buffer for dialed outgoing address
++        self.address_buffer_incoming = [] #Storage buffer for dialed incoming address
++        self.last_activity_time = None # A variable to store the last user input time
++        self.centre_button_outgoing = False #A variable for the state of the centre button, outgoing.
++        self.centre_button_incoming = False #A variable for the state of the centre button, incoming.
++        self.locked_chevrons_outgoing = 0 # The current number of locked outgoing chevrons
++        self.locked_chevrons_incoming = 0 # The current number of locked incoming chevrons
++        self.wormhole_active = False # The state of the wormhole.
++        self.black_hole = False # Did we dial the black hole?
++        self.fan_gate_online_status = True # To keep track of the dialed fan_gate status. Assume it's online until proven otherwise
++        self.fan_gate_incoming_ip = None # To keep track of the IP address for the remote gate that establishes a wormhole
++        self.fan_gate_incoming_name = None
++        self.fan_gate_incoming_address = None
++        self.connected_planet_name = None
++        self.extended_mode = False
++
++        self.random_dhd_symbols = []
++        self.random_dhd_index = 0
++        self.random_dhd_active = False
++        self.random_dhd_last_time = 0
++        self.random_dhd_center_pending = False
++
++        self.incoming_visual_symbols = []
++
++        self.extended_sequence_stage = 0
++        self.extended_sequence_last_time = 0
++
++    def _get_dhd_hw(self):
++        try:
++            dialer = getattr(self, "dialer", None)
++            hw = getattr(dialer, "hardware", None) if dialer else None
++            dhd_type = getattr(dialer, "type", None) if dialer else None
++            if hw is not None and dhd_type == "DHDv2":
++                return hw
++        except Exception:
++            pass
++        return None
++
++    def _dhd_symbol_on(self, symbol_number):
++        hw = self._get_dhd_hw()
++        if hw is None:
++            return False
++
++        try:
++            fn = getattr(hw, "set_symbol_on", None)
++            if callable(fn):
++                fn(symbol_number)
++                return True
++        except Exception:
++            pass
++
++        fallback_calls = [
++            ("set_symbol", (symbol_number, True)),
++            ("symbol_on", (symbol_number,)),
++            ("turn_on_symbol", (symbol_number,)),
++            ("set_single_symbol", (symbol_number, True)),
++        ]
++
++        for method_name, args in fallback_calls:
++            try:
++                fn = getattr(hw, method_name, None)
++                if callable(fn):
++                    fn(*args)
++                    return True
++            except Exception:
++                pass
++
++        return False
++
++    def _dhd_center_on(self):
++        hw = self._get_dhd_hw()
++        if hw is None:
++            return False
++        try:
++            fn = getattr(hw, "set_center_on", None)
++            if callable(fn):
++                fn()
++                return True
++        except Exception:
++            pass
++        return False
++
++    def _dhd_latch(self):
++        hw = self._get_dhd_hw()
++        if hw is None:
++            return
++        try:
++            fn = getattr(hw, "latch", None)
++            if callable(fn):
++                fn()
++        except Exception:
++            pass
++
++    def _dhd_clear(self):
++        hw = self._get_dhd_hw()
++        if hw is None:
++            return
++        try:
++            fn = getattr(hw, "clear_all_pixels", None)
++            if callable(fn):
++                fn()
++                self._dhd_latch()
++                return
++        except Exception:
++            pass
++
++        try:
++            fn = getattr(hw, "clear_lights", None)
++            if callable(fn):
++                fn()
++        except Exception:
++            pass
++
++    def _prepare_random_dhd_sequence(self, random_symbol_count):
++        """
++        Start random DHD sequence:
++        - normal incoming: 6 random + Earth(last) + center(after Earth)
++        - extended incoming: 8 random + Earth(last) + center(after Earth)
++        """
++        hw = self._get_dhd_hw()
++        if hw is None:
++            return
++
++        try:
++            earth_symbol = 1
++
++            # Random symbols without Earth
++            pool = list(range(2, 40))
++            random_symbols = sample(pool, random_symbol_count)
++
++            # Earth must always be last
++            self.random_dhd_symbols = random_symbols + [earth_symbol]
++            self.incoming_visual_symbols = self.random_dhd_symbols.copy()
++
++            self.random_dhd_index = 0
++            self.random_dhd_active = True
++            self.random_dhd_last_time = 0
++            self.random_dhd_center_pending = True
++
++            try:
++                target_brightness = int(255 * 0.60)
++                hw.set_brightness_center(target_brightness)
++                hw.set_brightness_symbols(target_brightness)
++            except Exception:
++                pass
++
++            self._dhd_clear()
++            # Center comes only after Earth
++            self._dhd_latch()
++
++        except Exception as ex:
++            self.log.log(f'Random DHD prepare failed: {ex}')
++
++    def _update_random_dhd_sequence(self):
++        if not self.random_dhd_active:
++            return
++
++        now = time()
++        if self.random_dhd_last_time and (now - self.random_dhd_last_time) < 0.12:
++            return
++
++        if self.random_dhd_index < len(self.random_dhd_symbols):
++            symbol_number = self.random_dhd_symbols[self.random_dhd_index]
++            if self._dhd_symbol_on(symbol_number):
++                self._dhd_latch()
++
++            self.random_dhd_index += 1
++            self.random_dhd_last_time = now
++            return
++
++        if self.random_dhd_center_pending:
++            self._dhd_center_on()
++            self._dhd_latch()
++            self.random_dhd_center_pending = False
++            self.random_dhd_last_time = now
++            return
++
++        self.random_dhd_active = False
++
++    def _extended_white_on(self):
++        try:
++            cal_led = self.electronics.get_calibration_led()
++            if cal_led:
++                cal_led.on()
++        except Exception as ex:
++            self.log.log(f'Extended incoming: unable to turn WHITE LED on: {ex}')
++
++    def _extended_white_off(self):
++        try:
++            cal_led = self.electronics.get_calibration_led()
++            if cal_led:
++                cal_led.off()
++        except Exception as ex:
++            self.log.log(f'Extended incoming: unable to turn WHITE LED off: {ex}')
++
++    def _light_incoming_chevron(self, chevron_number):
++        try:
++            self.chevrons.get(chevron_number).incoming_on()
++            return True
++        except KeyError:
++            return False
++        except Exception as ex:
++            self.log.log(f'Extended incoming: unable to enable chevron {chevron_number}: {ex}')
++            return False
++
++    def _advance_extended_incoming_sequence(self):
++        """
++        Extended sequence after original 7-symbol incoming:
++        - 7th lock already happened in normal incoming engine
++        - then chevron 8
++        - then chevron 9
++        - then wormhole
++        """
++        if not self.extended_mode:
++            return True
++
++        now = time()
++
++        if self.extended_sequence_stage == 0:
++            self.extended_sequence_stage = 1
++            self.extended_sequence_last_time = now
++            return False
++
++        if (now - self.extended_sequence_last_time) < 0.55:
++            return False
++
++        if self.extended_sequence_stage == 1:
++            self._light_incoming_chevron(8)
++            self.extended_sequence_stage = 2
++            self.extended_sequence_last_time = now
++            return False
++
++        if self.extended_sequence_stage == 2:
++            self._light_incoming_chevron(9)
++            self.extended_sequence_stage = 3
++            self.extended_sequence_last_time = now
++            return False
++
++        if self.extended_sequence_stage == 3:
++            # Short natural pause before wormhole opens
++            if (now - self.extended_sequence_last_time) < 0.25:
++                return False
++            self.extended_sequence_stage = 4
++            return True
++
++        return True
++
++    def update(self):
++        """
++        This is the main method to keep the stargate running and make decisions based on the manipulated objects variables.
++        There are basically two main phases, the dialing phase and the wormhole phase.
++        :return: Nothing is returned.
++        """
++        while self.running: # If we have not aborted
++
++            # Keep DHD animation running during dialing
++            self._update_random_dhd_sequence()
++
++            ### The Dialing phase###
++            if not self.wormhole_active and self.running: # If we are in the dialing phase
++
++                ## Outgoing dialing ##
++                self.outgoing_dialing()
++
++                ## Incoming dialing ##
++                self.incoming_dialing()
++
++                ## Establishing wormhole ##
++                self.establishing_wormhole()
++
++                ### Check for inactivity ###
++                # If there are something in the buffers and no activity for 1 minute while dialing.
++                # TODO: Use Schedule
++                if self.inactivity( self.inactivity_timeout ):
++                    self.log.log('Inactivity detected, aborting.')
++                    self.shutdown()
++
++            ### The wormhole phase ###
++            elif self.wormhole_active: # If wormhole
++                self.ring.release() # Release the stepper motor.
++                self.wh_manager.establish_wormhole() # This will establish the wormhole and keep it running until self.wormhole_active is False
++                #When the wormhole is no longer running
++                self.shutdown(cancel_sound=False)
++
++            self.schedule.run_pending() # Run any scheduled items
++
++            sleep(0.1) # Give the CPU a break (and yield to other threads)
++
++        # When the stargate is no longer running.
++        self.shutdown(cancel_sound=False)
++
++
++    def outgoing_dialing(self):
++        """
++        This method handles the outgoing dialing of the stargate. It's kept in it's own method so not to clutter up the update method too much.
++        :return: Nothing is returned
++        """
++        if len(self.address_buffer_outgoing) > self.locked_chevrons_outgoing:
++            self.ring.move_symbol_to_chevron(self.address_buffer_outgoing[self.locked_chevrons_outgoing], self.locked_chevrons_outgoing + 1)  # Dial the symbol
++            self.locked_chevrons_outgoing += 1  # Increment the locked chevrons variable.
++
++            # If the gate shutdown requested, play the stop-dialing sound, and stop doing things.
++            if not self.running:
++                self.shutdown(cancel_sound=False, wormhole_fail_sound=True)
++                sleep(0.5) # Time to allow the wormhole_fail_sound to finish
++                return
++
++            try:
++                self.chevrons.get(self.locked_chevrons_outgoing).cycle_outgoing()  # Do the chevron locking thing.
++            except KeyError:  # If we dialed more chevrons than the stargate can handle.
++                pass  # Just pass without activating a chevron.
++
++            try:
++                self.log.log(f'Chevron {self.locked_chevrons_outgoing} locked with symbol: {self.address_buffer_outgoing[self.locked_chevrons_outgoing - 1]}')
++            except IndexError:
++                pass
++            self.last_activity_time = time()  # update the last_activity_time
++
++            ## If we are dialing a fan_gate, send the symbols to the remote gate.
++            if self.addr_manager.is_fan_made_stargate(self.address_buffer_outgoing):
++                # If the gate is presumed to be online, send it.
++                if self.fan_gate_online_status:
++                    # send the locked symbols to the remote gate.
++
++                    this_gate_ip = self.addr_manager.get_ip_from_stargate_address(self.address_buffer_outgoing )
++                    this_message = str( self.address_buffer_outgoing[0:self.locked_chevrons_outgoing] )
++                    has_connection = self.subspace_client.send_to_remote_stargate( this_gate_ip, this_message)[0] # Attempt to send
++
++                    # Check for success
++                    if has_connection:
++                        self.log.log(f'Subspace Sent: {self.address_buffer_outgoing[0:self.locked_chevrons_outgoing]}')
++
++                        # Check if the recipient is busy. If so, stop sending subspace messages to it.
++                        is_busy = self.subspace_client.get_status_of_remote_gate(this_gate_ip)
++                        if is_busy:
++                            self.log.log("The dialed Stargate is busy, can't establish a wormhole.")
++                        self.fan_gate_online_status = not is_busy
++
++                    else:
++                        self.log.log('This Gate is offline. Skipping Subspace sends for remainder of this dialing attempt.')
++                        self.fan_gate_online_status = False # Gate is offline, don't keep sending messages during this dialing attempt
++
++    def incoming_dialing(self):
++        """
++        This method handles the incoming dialing of the stargate. It's kept in it's own method so not to clutter up the update method too much.
++        :return: Nothing is returned
++        """
++
++        # If there are dialed incoming symbols that are not yet locked and we are currently not dialing out.
++        if len(self.address_buffer_incoming) > self.locked_chevrons_incoming and len(self.address_buffer_outgoing) == 0:
++
++            # If we are still receiving the correct address to match the local stargate:
++            buffer_first_6 = self.address_buffer_incoming[0:min(len(self.address_buffer_incoming), 6)] # get up to 6 symbols off incoming buffer
++            local_first_6 = self.addr_manager.get_book().get_local_address()[0:min(len(self.address_buffer_incoming), 6)] # get up to 6 symbols off the local address_buffer_incoming
++            loopback_first_6 = self.addr_manager.get_book().get_local_loopback_address()[0:min(len(self.address_buffer_incoming), 6)] # get up to 6 symbols off the loopback local address
++
++            # If the incoming address buffer matches our routable or unroutable local address, lock it.
++            if buffer_first_6 in (local_first_6, loopback_first_6):
++                self.log.log("Address matching. Incoming Buffer: " + str(self.address_buffer_incoming))
++
++                # Start DHD first, before the first chevron
++                if self.locked_chevrons_incoming == 0 and not self.random_dhd_active and self.random_dhd_index == 0:
++                    self.audio.play_random_clip("IncomingWormhole")
++                    self._prepare_random_dhd_sequence(8 if self.extended_mode else 6)
++                    self.last_activity_time = time()
++                    return
++
++                # DHD must stay ahead of chevrons
++                # Before locking chevron N, at least N DHD symbols must already be lit.
++                if self.random_dhd_index <= self.locked_chevrons_incoming:
++                    return
++
++                # If there are more than one unlocked symbol, add a short delay to avoid locking both symbols at once.
++                if len(self.address_buffer_incoming) > self.locked_chevrons_incoming + 1:
++                    delay = randrange(1, 800) / 100  # Add a delay with some randomness
++                else:
++                    delay = 0
++
++                self.locked_chevrons_incoming += 1  # Increment the locked chevrons variable.
++                try:
++                    self.chevrons.get(self.locked_chevrons_incoming).incoming_on()  # Do the chevron locking thing.
++                except KeyError:  # If we dialed more chevrons than the stargate can handle.
++                    pass  # Just pass without activating a chevron.
++
++                # Extended mode after original 7th symbol:
++                # white first, then 8, then 9, then wormhole
++                if self.extended_mode and self.locked_chevrons_incoming == 7:
++                    self._extended_white_on()
++
++                self.last_activity_time = time()  # update the last_activity_time
++
++                # Do the logging
++                self.log.log(f'Incoming: Chevron {self.locked_chevrons_incoming} locked with symbol {self.address_buffer_incoming[self.locked_chevrons_incoming - 1]}')
++
++                sleep(delay)  # if there's a delay, use it.
++            else:
++                self.log.log("Address is not a match for this gate")
++
++    # TODO: Some of this belongs in Subspace.
++    def try_sending_centre_button(self):
++        """
++        This functions simply checks if it is possible to send the centre_button to the remote gate and sends it.
++        This method is used in the establishing_wormhole method.
++        :return: Nothing is returned.
++        """
++        if  self.addr_manager.is_fan_made_stargate(self.address_buffer_outgoing) and \
++            self.fan_gate_online_status and \
++            self.centre_button_outgoing and \
++            len(self.address_buffer_outgoing) == self.locked_chevrons_outgoing:
++
++            _ip_address = self.addr_manager.get_ip_from_stargate_address(self.address_buffer_outgoing )
++            result = self.subspace_client.send_to_remote_stargate( _ip_address, subspace_messages.DIAL_CENTER_INCOMING )[0]
++            if result:
++                self.log.log('Sent: Center Button')
++
++    def get_connected_planet_name(self):
++
++        if self.wormhole_active == 'outgoing':
++            return self.addr_manager.get_planet_name_by_address(self.address_buffer_outgoing)
++        if self.wormhole_active == 'incoming':
++            if self.fan_gate_incoming_name:
++                return self.fan_gate_incoming_name
++            return self.addr_manager.get_planet_name_from_ip(self.fan_gate_incoming_ip)
++        # Not connected
++        return False
++
++    def establishing_wormhole(self):
++        """
++        This is the method that decides if we are to establish a wormhole or not
++        :return: Nothing is returned, But the self.wormhole_active variable is changed if we can establish a wormhole.
++        """
++        ### Establishing wormhole ###
++        ## Outgoing wormhole##
++        # If the centre_button_outgoing is active and all dialed symbols are locked.
++        if self.centre_button_outgoing and (0 < len(self.address_buffer_outgoing) == self.locked_chevrons_outgoing):
++
++            # Try to send the centre button to the fan_gate:
++            self.try_sending_centre_button()
++            # Try to establish a wormhole
++            if self.possible_to_establish_wormhole():
++
++                self.ring.release() # Release the stepper to prevent overheating
++
++                # Update the state variables
++                self.wormhole_active = 'outgoing'
++                self.connected_planet_name = self.get_connected_planet_name()
++
++                # Log some stuff
++                self.log.log('Valid address is locked')
++                self.log.log(f'OUTGOING Wormhole to {self.connected_planet_name} established')
++
++                # Log the connection!
++                self.dialing_log.established_outbound(self.address_buffer_outgoing)
++
++                # Check if we dialed a black hole planet
++                if self.addr_manager.get_book().get_entry_by_address(self.address_buffer_outgoing[0:-1])['is_black_hole']:
++                    self.log.log("Oh no! It's the black hole planet!")
++                    self.black_hole = True
++            else:
++                # Log the dialing failure
++                self.dialing_log.dialing_fail(self.address_buffer_outgoing)
++                self.shutdown(cancel_sound=False, wormhole_fail_sound=True)
++
++        ## Incoming wormhole ##
++        # If the centre_button_incoming is active and all dialed symbols are locked.
++        elif self.centre_button_incoming and 0 < len(self.address_buffer_incoming) == self.locked_chevrons_incoming:
++            # If the incoming wormhole matches the local address
++            if self.address_buffer_incoming[0:-1] == self.addr_manager.get_book().get_local_address() or \
++                self.address_buffer_incoming[0:-1] == self.addr_manager.get_book().get_local_loopback_address():
++
++                # Extended incoming:
++                # after original 7-symbol incoming,
++                # add 8, then 9, then wormhole
++                if self.extended_mode:
++                    if not self._advance_extended_incoming_sequence():
++                        return
++
++                # Update some state variables
++                self.wormhole_active = 'incoming'  # Set the wormhole state to activate the wormhole.
++                self.connected_planet_name = self.get_connected_planet_name()
++
++                try:
++                    self.dialer.hardware.set_center_on() # Activate the centre_button light
++                except Exception:
++                    pass
++
++                self.log.log('Incoming address is a match!')
++                self.log.log(f'INCOMING Wormhole from {self.connected_planet_name} established')
++
++                # Log the connection!
++                self.dialing_log.established_inbound(
++                    getattr(self, "fan_gate_incoming_address", None),
++                    self.connected_planet_name,
++                    getattr(self, "fan_gate_incoming_ip", None)
++                )
++
++            else:
++                self.log.log('Incoming address is NOT a match to Local Gate Address!')
++                self.shutdown(cancel_sound=False, wormhole_fail_sound=True)
++
++
++    def shutdown(self, cancel_sound=True, wormhole_fail_sound=False):
++        """
++        This method shuts down and resets the Stargate.
++        :return:
++        """
++
++        self.log.log('Shutting down the gate...')
++
++        # Play the cancel sound
++        if cancel_sound:
++            self.audio.sound_start('dialing_cancel')
++
++        # Play the wormhole fail sound
++        if wormhole_fail_sound:
++            self.audio.sound_start('dialing_fail')
++
++        self._extended_white_off()
++
++        # Turn off the chevrons
++        self.chevrons.all_off()
++
++        # Turn off the DHD lights
++        try:
++            self.dialer.hardware.clear_lights()
++        except Exception:
++            self._dhd_clear()
++
++        # Release the stepper motor.
++        self.ring.release()
++
++        # Put the gate back in to an idle state
++        self.initialize_gate_state_vars()
++
++        self.dialing_log.shutdown()
++
++    def inactivity(self, seconds):
++        """
++        This functions checks if there has been more than the variable seconds of inactivity:
++        :param seconds: The number of seconds of allowed inactivity
++        :return: True if inactivity is detected, False if not
++        """
++
++        # TODO: Use schedule
++
++        if not self.wormhole_active: #If we are in the dialing phase
++            if self.last_activity_time: #If the variable is not None
++                if (len(self.address_buffer_incoming) > 0) or (len(self.address_buffer_outgoing) > 0): # If there are something in the buffers
++                    if (time() - self.last_activity_time) > seconds:
++                        return True
++        return False
++
++    def possible_to_establish_wormhole(self):
++        """
++        This is a method to help check if we are able to establish a wormhole or not.
++        :return: Returns True if we can establish a wormhole, and False if not
++        """
++
++        # TODO: Some of this belongs in Subspace.
++
++        # If the dialed address is valid
++        if self.fan_gate_online_status and ( len(self.address_buffer_outgoing) > 0 and self.addr_manager.valid_planet(self.address_buffer_outgoing) or \
++            len(self.address_buffer_incoming) > 0 and self.addr_manager.valid_planet(self.address_buffer_incoming) ):
++            # If we dialed a fan_gate
++            if self.addr_manager.valid_planet(self.address_buffer_outgoing) == 'fan_gate':
++                # If the dialed fan_gate is not online
++                if not self.fan_gate_online_status:
++                    self.log.log('The dialed fan_gate is NOT online!')
++                    return False
++                # If the dialed fan_gate is already busy, with an active wormhole or outgoing dialing is in progress.
++                if self.subspace_client.get_status_of_remote_gate(self.addr_manager.get_ip_from_stargate_address(self.address_buffer_outgoing )):
++                    self.log.log('The dialed fan_gate is already busy!')
++                    return False
++            return True  # returns true if we can establish a wormhole
++        return False  # returns false if we cannot establish a wormhole.
+diff -ruN original/classes/keyboard_manager.py upgraded/classes/keyboard_manager.py
+--- original/classes/keyboard_manager.py	2026-05-14 20:20:25
++++ upgraded/classes/keyboard_manager.py	2026-05-03 10:16:59
+@@ -110,16 +110,48 @@
+         self.dhd_test_active_buttons = []
+ 
+     def handle_dhd_test(self, key):
++
++        # --- center button: solid LED ON in test mode ---
++
++        raw = str(key).strip()
++
++        k = raw.lower()
++
++        center = str(getattr(self, 'center_button_key', 'A')).strip()
++
++        if raw == center:
++
++            try:
++
++                self.stargate.dialer.hardware.set_center_on()
++
++                self.log.log('DHD Test: CENTER pressed -> set_center_on()')
++
++            except Exception as e:
++
++                try:
++
++                    self.stargate.dialer.set_center_on()
++
++                    self.log.log('DHD Test: CENTER pressed -> dialer.set_center_on()')
++
++                except Exception as e2:
++
++                    self.log.log(f'DHD Test: center LED error: {e} / fallback: {e2}')
++
++            return
++
+         # Handle test mode here
+         try:
+             symbol_number = self.symbol_manager.get_symbol_key_map()[key]
+             self.log.log(f'DHD Test: Pressed Key {key} --> Symbol {symbol_number}')
+         except KeyError:
+             if key == self.center_button_key:
+-                self.log.log(f'DHD Test: Pressed Center Button {key} --> Symbol {symbol_number}')
+                 symbol_number = 0
++                self.log.log(f'DHD Test: Pressed Center Button {key} --> Symbol {symbol_number}')
+             else:
+                 self.log.log(f'DHD Test: Key NOT RECOGNIZED {key}')
++                return
+ 
+         if symbol_number not in self.dhd_test_active_buttons:
+             self.dhd_test_active_buttons.append(symbol_number)
+@@ -150,6 +182,12 @@
+             self.stargate.wormhole_active = False # Shutdown any open wormholes (particularly if turned on via web interface)
+             self.stargate.running = False  # Stop the stargate object from running.
+             return
++        
++        # --- ALARM STOP ---
++        if key == self.center_button_key and hasattr(self.stargate, 'alarm_clock') and self.stargate.alarm_clock.is_active():
++            self.log.log('Alarm stop requested from DHD center button')
++            self.stargate.alarm_clock.stop_alarm()
++            return
+ 
+         # Center Button
+         if key == self.center_button_key:
+@@ -172,7 +210,10 @@
+         if symbol_number != 'unknown' and symbol_number not in self.stargate.address_buffer_outgoing:
+             # If we have not yet activated the centre_button
+             if not (self.stargate.centre_button_outgoing or self.stargate.centre_button_incoming):
+-                self.stargate.dialer.hardware.set_symbol_on( symbol_number ) # Light this symbol on the DHD
++                try:
++                    self.stargate.dialer.hardware.set_symbol_on(symbol_number) # Light this symbol on the DHD
++                except (KeyError, IndexError):
++                    self.log.log(f'Symbol {symbol_number} is web-only; no physical DHD LED mapping.')
+ 
+                 # Append the symbol to the outgoing address buffer
+                 self.stargate.address_buffer_outgoing.append(symbol_number)
+diff -ruN original/classes/web_server.py upgraded/classes/web_server.py
+--- original/classes/web_server.py	2026-05-14 20:20:25
++++ upgraded/classes/web_server.py	2026-05-04 02:32:26
+@@ -1,15 +1,19 @@
+ import os
+ import json
++import re
+ from time import sleep
+ import urllib.parse
+ import collections
+ import platform
++import random
++import time
+ from http.server import SimpleHTTPRequestHandler
+ 
++
+ class StargateWebServer(SimpleHTTPRequestHandler):
+ 
+-    #Overload SimpleHTTPRequestHandler.log_message() to suppress logs from printing to console
+-    def log_message(self, format, *args): # pylint: disable=redefined-builtin
++    # Overload SimpleHTTPRequestHandler.log_message() to suppress logs from printing to console
++    def log_message(self, format, *args):  # pylint: disable=redefined-builtin
+         if self.stargate.cfg.get("control_api_debug_enable"):
+             self.stargate.log.log(f'{self.client_address[0]} {str(args[0])}')
+ 
+@@ -19,18 +23,28 @@
+         if '?' in path:
+             path, tmp = path.split('?', 1)
+             query_string = urllib.parse.parse_qs(tmp)
++        if path.startswith('/stargate/'):
++            path = path[len('/stargate'):]
+         return path, query_string
+ 
+-    def do_GET(self): # pylint: disable=invalid-name
++    def do_GET(self):  # pylint: disable=invalid-name
+         try:
+             request_path, get_vars = self.parse_get_vars()
+ 
++            if request_path == "/dial":
++                target = self.get_home_dial_path()
++                query = urllib.parse.urlparse(self.path).query
++                self.send_response(302)
++                self.send_header("Location", target + ("?" + query if query else ""))
++                self.end_headers()
++                return
++
+             if request_path == "/get/is_alive":
+-                data = { 'is_alive': True }
++                data = {'is_alive': True}
+ 
+             elif request_path == "/get/address_book":
+                 data = {}
+-                record_type = get_vars.get('type')[0]
++                record_type = get_vars.get('type', ['all'])[0]
+                 if record_type == "standard":
+                     data['address_book'] = self.stargate.addr_manager.get_book().get_standard_gates()
+                 elif record_type == "fan":
+@@ -46,56 +60,73 @@
+                 data = self.stargate.addr_manager.get_book().get_local_address()
+ 
+             elif request_path == "/get/dialing_status":
++                incoming_visual_symbols = getattr(self.stargate, "incoming_visual_symbols", [])
++                extended_sequence_stage = getattr(self.stargate, "extended_sequence_stage", 0)
++                incoming_visual_locked_chevrons = self.stargate.locked_chevrons_incoming
++
++                if len(incoming_visual_symbols) > len(self.stargate.address_buffer_incoming):
++                    if extended_sequence_stage >= 2:
++                        incoming_visual_locked_chevrons += 1
++                    if extended_sequence_stage >= 3:
++                        incoming_visual_locked_chevrons += 1
++
++                    incoming_visual_locked_chevrons = min(
++                        incoming_visual_locked_chevrons,
++                        len(incoming_visual_symbols)
++                    )
++
+                 data = {
+-                    "gate_name":                self.stargate.addr_manager.get_book().get_local_gate_name(),
+-                    "local_address":            self.stargate.addr_manager.get_book().get_local_address(),
+-                    "address_buffer_outgoing":  self.stargate.address_buffer_outgoing,
++                    "gate_name": self.stargate.addr_manager.get_book().get_local_gate_name(),
++                    "local_address": self.stargate.addr_manager.get_book().get_local_address(),
++                    "address_buffer_outgoing": self.stargate.address_buffer_outgoing,
+                     "locked_chevrons_outgoing": self.stargate.locked_chevrons_outgoing,
+-                    "address_buffer_incoming":  self.stargate.address_buffer_incoming,
++                    "address_buffer_incoming": self.stargate.address_buffer_incoming,
+                     "locked_chevrons_incoming": self.stargate.locked_chevrons_incoming,
+-                    "wormhole_active":          self.stargate.wormhole_active,
+-                    "black_hole_connected":     self.stargate.black_hole,
+-                    "connected_planet":         self.stargate.connected_planet_name,
+-                    "wormhole_open_time":       self.stargate.wh_manager.open_time,
+-                    "wormhole_max_time":        self.stargate.wh_manager.wormhole_max_time,
++                    "incoming_visual_symbols": incoming_visual_symbols,
++                    "incoming_visual_locked_chevrons": incoming_visual_locked_chevrons,
++                    "extended_sequence_stage": extended_sequence_stage,
++                    "wormhole_active": self.stargate.wormhole_active,
++                    "black_hole_connected": self.stargate.black_hole,
++                    "connected_planet": self.stargate.connected_planet_name,
++                    "wormhole_open_time": self.stargate.wh_manager.open_time,
++                    "wormhole_max_time": self.stargate.wh_manager.wormhole_max_time,
+                     "wormhole_time_till_close": self.stargate.wh_manager.get_time_remaining(),
+-                    "ring_position":            self.stargate.ring.get_position(),
+-                    "speed_dial_full_address":  self.stargate.cfg.get('dialing_address_book_dials_full_address')
++                    "ring_position": self.stargate.ring.get_position(),
++                    "speed_dial_full_address": self.stargate.cfg.get('dialing_address_book_dials_full_address')
+                 }
+ 
+             elif request_path == "/get/system_info":
+                 data = {
+-                    "gate_name":                      self.stargate.addr_manager.get_book().get_local_gate_name(),
+-                    "local_stargate_address":         self.stargate.addr_manager.get_book().get_local_address(),
+-                    "local_stargate_address_string":  self.stargate.addr_manager.get_book().get_local_address_string(),
+-                    "subspace_public_key":            self.stargate.subspace_client.get_public_key(),
+-                    "subspace_ip_address_config":     self.stargate.subspace_client.get_configured_ip(),
+-                    "subspace_ip_address_active":     self.stargate.net_tools.get_subspace_ip(True),
+-                    "lan_ip_address":                 self.stargate.net_tools.get_ip_by_interface_list( [ 'wlan0', 'eth0', 'en0', 'en1' ] ),
+-                    "software_version":               str(self.stargate.sw_updater.get_current_version()),
+-                    "software_update_last_check":     self.stargate.cfg.get('software_update_last_check'),
+-                    "software_update_status":         self.stargate.cfg.get('software_update_status'),
+-                    "python_version":                 platform.python_version(),
+-                    "internet_available":             self.stargate.net_tools.has_internet_access(),
+-                    "subspace_available":             self.stargate.subspace_client.is_online(),
+-                    "standard_gate_count":            len(self.stargate.addr_manager.get_book().get_standard_gates()),
+-                    "fan_gate_count":                 len(self.stargate.addr_manager.get_book().get_fan_gates()),
+-                    "lan_gate_count":                 len(self.stargate.addr_manager.get_book().get_lan_gates()),
+-                    "fan_gate_last_update":           self.stargate.cfg.get('fan_gate_last_update'),
+-                    "dialer_mode":                    self.stargate.dialer.type,
+-                    "hardware_mode":                  self.stargate.electronics.name,
+-                    "audio_volume":                   self.stargate.audio.volume,
+-                    "galaxy":                         self.stargate.galaxy
++                    "gate_name": self.stargate.addr_manager.get_book().get_local_gate_name(),
++                    "local_stargate_address": self.stargate.addr_manager.get_book().get_local_address(),
++                    "local_stargate_address_string": self.stargate.addr_manager.get_book().get_local_address_string(),
++                    "subspace_public_key": self.stargate.subspace_client.get_public_key(),
++                    "subspace_ip_address_config": self.stargate.subspace_client.get_configured_ip(),
++                    "subspace_ip_address_active": self.stargate.net_tools.get_subspace_ip(True),
++                    "lan_ip_address": self.stargate.net_tools.get_ip_by_interface_list(['wlan0', 'eth0', 'en0', 'en1']),
++                    "software_version": str(self.stargate.sw_updater.get_current_version()),
++                    "software_update_last_check": self.stargate.cfg.get('software_update_last_check'),
++                    "software_update_status": self.stargate.cfg.get('software_update_status'),
++                    "python_version": platform.python_version(),
++                    "internet_available": self.stargate.net_tools.has_internet_access(),
++                    "subspace_available": self.stargate.subspace_client.is_online(),
++                    "standard_gate_count": len(self.stargate.addr_manager.get_book().get_standard_gates()),
++                    "fan_gate_count": len(self.stargate.addr_manager.get_book().get_fan_gates()),
++                    "lan_gate_count": len(self.stargate.addr_manager.get_book().get_lan_gates()),
++                    "fan_gate_last_update": self.stargate.cfg.get('fan_gate_last_update'),
++                    "dialer_mode": self.stargate.dialer.type,
++                    "hardware_mode": self.stargate.electronics.name,
++                    "audio_volume": self.stargate.audio.volume,
++                    "galaxy": self.stargate.galaxy
+                 }
+ 
+-                # Put the lifetime stats in here too.
+                 for key, value in self.stargate.dialing_log.get_summary().items():
+-                    data['stats_'+key] = value.get('value')
++                    data['stats_' + key] = value.get('value')
+ 
+             elif request_path == "/get/hardware_status":
+                 data = {
+-                    "chevrons":                       self.stargate.chevrons.get_status(),
+-                    "glyph_ring":                     self.stargate.ring.get_status()
++                    "chevrons": self.stargate.chevrons.get_status(),
++                    "glyph_ring": self.stargate.ring.get_status()
+                 }
+ 
+             elif request_path == "/get/dhd_symbols":
+@@ -109,6 +140,23 @@
+             elif request_path == "/get/symbols_all":
+                 data = self.stargate.symbol_manager.get_all()
+ 
++            elif request_path == "/get/alarm_clock":
++                data = self.stargate.alarm_clock.get_alarm_data()
++
++            elif request_path == "/get/alarm_audio_files":
++                data = {
++                    "files": self.stargate.alarm_clock.list_audio_files()
++                }
++
++            elif request_path == "/get/dialing_history":
++                data = {
++                    "history": self.stargate.dialing_log.get_history(),
++                    "summary": {
++                        key: value.get("value")
++                        for key, value in self.stargate.dialing_log.get_summary().items()
++                    }
++                }
++
+             elif request_path == "/get/config":
+                 data = collections.OrderedDict(sorted(self.stargate.cfg.get_all_configs().items()))
+ 
+@@ -116,42 +164,37 @@
+                 data = self.stargate.audio.list_clips()
+ 
+             else:
+-                # Unhandled GET request: send a 404
+                 self.send_response(404, 'Not Found')
+                 self.end_headers()
+                 return
+ 
+-            content = json.dumps( data )
++            content = json.dumps(data)
+             self.send_response(200, 'OK')
+-            self.send_header("Content-type", "text/json")
++            self.send_header("Content-type", "application/json")
+             self.send_header("Access-Control-Allow-Origin", "*")
+             self.send_header("Access-Control-Allow-Headers", 'Authorization, Content-Type')
+             self.send_header("Access-Control-Allow-Methods", 'GET')
+             self.end_headers()
+             self.wfile.write(content.encode())
+ 
+-        except: # pylint: disable=bare-except
++        except:  # pylint: disable=bare-except
+             if self.stargate.cfg.get("control_api_debug_enable"):
+                 raise
+ 
+-            # Encountered an exception: send a 500
+             self.send_response(500, "Exception")
+             self.end_headers()
+ 
+-    def do_POST(self): # pylint: disable=invalid-name
++    def do_POST(self):  # pylint: disable=invalid-name
+         try:
+-            #print('POST PATH: {}'.format(self.path))
+-
++            if self.path.startswith('/stargate/'):
++                self.path = self.path[len('/stargate'):]
+             content_len = int(self.headers.get('content-length', 0))
+             body = self.rfile.read(content_len)
+             try:
+                 data = json.loads(body)
+-            except: # pylint: disable=bare-except
++            except:  # pylint: disable=bare-except
+                 data = {}
+ 
+-            #print('POST DATA: {}'.format(data))
+-
+-            ##### DO ACTION HANDLERS BELOW ####
+             if self.path == '/do/shutdown':
+                 self.stargate.wormhole_active = False
+                 sleep(5)
+@@ -178,70 +221,194 @@
+                 self.stargate.wormhole_active = False
+                 sleep(5)
+                 self.send_response(200, 'OK')
++                self.end_headers()
+                 os.system('systemctl restart stargate.service')
+                 return
+ 
+             if self.path == "/do/chevron_cycle":
+                 self.stargate.chevrons.get(int(data['chevron_number'])).cycle_outgoing()
+-                data = { "success": True }
++                data = {"success": True}
+ 
+             elif self.path == "/do/all_chevron_leds_off":
+                 self.stargate.chevrons.all_off()
+                 self.stargate.wormhole_active = False
+-                data = { "success": True }
++                data = {"success": True}
+ 
+             elif self.path == "/do/all_chevron_leds_on":
+                 self.stargate.chevrons.all_lights_on()
+-                data = { "success": True }
++                data = {"success": True}
+ 
++            elif self.path == "/do/white_on":
++                try:
++                    cal_led = self.stargate.electronics.get_calibration_led()
++                    if cal_led:
++                        cal_led.on()
++                        data = {"success": True}
++                    else:
++                        self.stargate.log.log("WHITE_ON ERROR: calibration_led is None")
++                        data = {"success": False}
++                except Exception as exc:
++                    self.stargate.log.log(f"WHITE_ON ERROR: {exc}")
++                    data = {"success": False}
++
++            elif self.path == "/do/white_off":
++                try:
++                    cal_led = self.stargate.electronics.get_calibration_led()
++                    if cal_led:
++                        cal_led.off()
++                        data = {"success": True}
++                    else:
++                        self.stargate.log.log("WHITE_OFF ERROR: calibration_led is None")
++                        data = {"success": False}
++                except Exception as exc:
++                    self.stargate.log.log(f"WHITE_OFF ERROR: {exc}")
++                    data = {"success": False}
++
+             elif self.path == "/do/wormhole_on":
+                 if not self.stargate.wormhole_active:
++                    self.stargate.black_hole = False
++                    self.stargate.manual_dynamic_override = False
+                     self.stargate.wormhole_active = True
+-                    data = { "success": True }
++                    data = {"success": True}
+                 else:
+-                    data = { "success": False, "message": "A wormhole is already established." }
++                    data = {"success": False, "message": "A wormhole is already established."}
+ 
++            elif self.path == "/do/dynamic_wormhole_on":
++                if not self.stargate.wormhole_active:
++                    self.stargate.black_hole = False
++                    self.stargate.manual_dynamic_override = True
++                    self.stargate.wormhole_active = True
++                    data = {"success": True}
++                else:
++                    data = {"success": False, "message": "A wormhole is already established."}
++
++            elif self.path == "/do/blackhole_on":
++                if not self.stargate.wormhole_active:
++                    self.stargate.black_hole = True
++                    self.stargate.manual_dynamic_override = None
++                    self.stargate.wormhole_active = True
++                    data = {"success": True}
++                else:
++                    data = {"success": False, "message": "A wormhole is already established."}
++
+             elif self.path == "/do/wormhole_off":
++                self.stargate.black_hole = False
+                 self.stargate.wormhole_active = False
+-                data = { "success": True }
++                data = {"success": True}
+ 
++            elif self.path == "/do/dhd_on":
++                try:
++                    dhd = getattr(self.stargate.dialer, "hardware", None)
++                    dhd_type = getattr(self.stargate.dialer, "type", "Unknown")
++
++                    if dhd is None or dhd_type != "DHDv2":
++                        self.stargate.log.log(f"DHD ON: DHD not active (type={dhd_type})")
++                        data = {
++                            "success": False,
++                            "message": "DHDv2 not connected"
++                        }
++                    else:
++                        target_brightness = int(255 * 0.60)
++                        dhd.set_brightness_center(target_brightness)
++                        dhd.set_brightness_symbols(target_brightness)
++
++                        center_color = (255, 0, 0)
++                        ring_color = (255, 50, 0)
++
++                        dhd.clear_all_pixels()
++                        dhd.set_color_center(center_color)
++                        dhd.set_color_symbols(ring_color)
++                        dhd.set_all_pixels_to_color(*ring_color)
++                        dhd.set_center_on()
++                        dhd.latch()
++
++                        self.stargate.log.log(
++                            f"DHD ON: center={center_color}, ring={ring_color}, brightness={target_brightness}"
++                        )
++                        data = {"success": True}
++
++                except Exception as exc:
++                    self.stargate.log.log(f"DHD ON ERROR: {exc}")
++                    data = {"success": False, "message": str(exc)}
++
++            elif self.path == "/do/dhd_off":
++                try:
++                    dhd = getattr(self.stargate.dialer, "hardware", None)
++                    dhd_type = getattr(self.stargate.dialer, "type", "Unknown")
++
++                    if dhd is None or dhd_type != "DHDv2":
++                        self.stargate.log.log(f"DHD OFF: DHD not active (type={dhd_type})")
++                        data = {
++                            "success": False,
++                            "message": "DHDv2 not connected"
++                        }
++                    else:
++                        dhd.clear_all_pixels()
++                        dhd.latch()
++                        self.stargate.log.log("DHD OFF: LEDs cleared")
++                        data = {"success": True}
++
++                except Exception as exc:
++                    self.stargate.log.log(f"DHD OFF ERROR: {exc}")
++                    data = {"success": False, "message": str(exc)}
++
+             elif self.path == "/do/symbol_forward":
+-                self.stargate.ring.move( 33, self.stargate.ring.forward_direction ) # Steps, Direction
++                self.stargate.ring.move(33, self.stargate.ring.forward_direction)
+                 self.stargate.ring.release()
+-                data = { "success": True }
++                data = {"success": True}
+ 
+             elif self.path == "/do/symbol_backward":
+-                self.stargate.ring.move( 33, self.stargate.ring.backward_direction ) # Steps, Direction
++                self.stargate.ring.move(33, self.stargate.ring.backward_direction)
+                 self.stargate.ring.release()
+-                data = { "success": True }
++                data = {"success": True}
+ 
+             elif self.path == "/do/volume_down":
+                 self.stargate.audio.volume_down()
+-                data = { "success": True }
++                data = {"success": True}
+ 
+             elif self.path == "/do/volume_up":
+                 self.stargate.audio.volume_up()
+-                data = { "success": True }
++                data = {"success": True}
+ 
+             elif self.path == "/do/simulate_incoming":
+-                if not self.stargate.wormhole_active: # If we don't already have an established wormhole
+-                    # Get the loopback address and dial it
++                if getattr(self.stargate, "wormhole_active", False):
++                    data = {"success": False, "message": "A wormhole is already established."}
++                else:
++                    payload = data if isinstance(data, dict) else {}
++                    extended = bool(payload.get("extended", False))
++
++                    self.stargate.extended_mode = extended
++
++                    self.stargate.incoming_visual_symbols = []
++                    self.stargate.random_dhd_symbols = []
++                    self.stargate.random_dhd_index = 0
++                    self.stargate.random_dhd_active = False
++                    self.stargate.random_dhd_last_time = 0
++                    self.stargate.random_dhd_center_pending = False
++                    self.stargate.extended_sequence_stage = 0
++                    self.stargate.extended_sequence_last_time = 0
++
++                    self.stargate.address_buffer_incoming = []
++                    self.stargate.locked_chevrons_incoming = 0
++
+                     for symbol_number in self.stargate.addr_manager.get_book().get_local_loopback_address():
+                         self.stargate.address_buffer_incoming.append(symbol_number)
+ 
+-                    self.stargate.address_buffer_incoming.append(7) # Point of origin
++                    self.stargate.address_buffer_incoming.append(7)
+                     self.stargate.centre_button_incoming = True
+-                    data = { "success": True }
+-                else:
+-                    data = { "success": False, "message": "A wormhole is already established." }
+ 
++                    data = {
++                        "success": True,
++                        "mode": "extended" if extended else "original"
++                    }
++
+             elif self.path == "/do/subspace_up":
+                 print("Subspace UP")
+-                data = { "success": False, "message": "API NOT IMPLEMENTED" }
++                data = {"success": False, "message": "API NOT IMPLEMENTED"}
+ 
+             elif self.path == "/do/subspace_down":
+                 print("Subspace DOWN")
+-                data = { "success": False, "message": "API NOT IMPLEMENTED" }
++                data = {"success": False, "message": "API NOT IMPLEMENTED"}
+ 
+             elif self.path == "/do/dhd_press":
+                 symbol_number = int(data['symbol'])
+@@ -251,110 +418,154 @@
+                 elif symbol_number == 0:
+                     self.stargate.keyboard.queue_center_button()
+                 elif symbol_number == -1 and self.stargate.wormhole_active is False and len(self.stargate.address_buffer_outgoing) > 0:
+-                    # Abort dialing
+                     self.stargate.dialing_log.dialing_fail(self.stargate.address_buffer_outgoing)
+                     self.stargate.shutdown(cancel_sound=False, wormhole_fail_sound=False)
+ 
+-                data = { "success": True }
++                data = {"success": True}
+ 
+             elif self.path == "/do/clear_outgoing_buffer":
+                 self.stargate.shutdown(cancel_sound=False, wormhole_fail_sound=False)
+-                data = { "success": True }
++                data = {"success": True}
+ 
+             elif self.path == "/do/set_glyph_ring_zero":
+                 self.stargate.ring.zero_position()
+-                data = { "success": True }
++                data = {"success": True}
+ 
++            elif self.path == "/do/dhd_led_test":
++                try:
++                    dhd = getattr(self.stargate.dialer, "hardware", None)
++                    dhd_type = getattr(self.stargate.dialer, "type", "Unknown")
++
++                    if dhd is None or dhd_type != "DHDv2":
++                        self.stargate.log.log(f"DHD LED TEST: DHD not active (type={dhd_type})")
++                        data = {
++                            "success": False,
++                            "message": "DHDv2 not connected"
++                        }
++                    else:
++                        try:
++                            mode = data.get("mode", "full")
++                        except Exception:
++                            mode = "full"
++
++                        from test.dhd_test_from_config import dhd_led_test_backend
++                        import threading
++
++                        threading.Thread(
++                            target=dhd_led_test_backend.run_dhd_test,
++                            args=(dhd, self.stargate.log, mode),
++                            daemon=True
++                        ).start()
++
++                        data = {"success": True, "mode": mode}
++
++                except Exception as exc:
++                    self.stargate.log.log(f"DHD LED TEST ERROR: {exc}")
++                    data = {"success": False, "message": str(exc)}
++
+             elif self.path == "/do/dhd_test_enable":
+                 self.stargate.keyboard.enable_dhd_test(True)
+-                data = { "success": True }
++                data = {"success": True}
+ 
+             elif self.path == "/do/dhd_test_disable":
+                 self.stargate.keyboard.enable_dhd_test(False)
+-                data = { "success": True }
++                data = {"success": True}
+ 
+             elif self.path == '/do/audio_play':
+                 try:
+                     clip = data['clip']
+                 except KeyError:
+-                    data = { "success": False, "error": "Required fields missing or invalid request" }
++                    data = {"success": False, "error": "Required fields missing or invalid request"}
+                     return
+ 
+                 try:
+-                    # Convert path into proper dictionary key
+                     clip_name = clip.replace('/', '_').split('.')[0]
+                     if clip_name[0] == '_':
+                         clip_name = clip_name[1:]
+ 
+-                    # Clip has not been initialized
+                     if clip_name not in self.stargate.audio.sounds:
+-                        self.stargate.audio.sounds[clip_name] = { 'file': self.stargate.audio.init_wav_file('/' + clip) }
++                        self.stargate.audio.sounds[clip_name] = {
++                            'file': self.stargate.audio.init_wav_file('/' + clip)
++                        }
+ 
+                     self.stargate.audio.sound_start(clip_name)
+-                except ValueError as ex:
+-                    data = { "success": False, "error": str(ex) }
++                except ValueError as exc:
++                    data = {"success": False, "error": str(exc)}
+                     return
+-                data = { "success": True }
+ 
++                data = {"success": True}
+ 
+-            ##### UPDATE DATA HANDLERS BELOW ####
+-            elif self.path == '/update/local_stargate_address':
++            elif self.path == '/do/test_alarm_clock':
++                data = self.stargate.alarm_clock.test_alarm(data.get('audio_file'))
+ 
++            elif self.path == '/do/stop_alarm_clock':
++                data = self.stargate.alarm_clock.stop_alarm()
++
++            elif self.path == '/update/alarm_clock':
++                try:
++                    alarm_data = self.stargate.alarm_clock.update_alarm(data)
++                    data = {
++                        "success": True,
++                        "message": "Alarm clock settings saved.",
++                        "alarm": alarm_data
++                    }
++                except Exception as exc:
++                    data = {"success": False, "message": str(exc)}
++
++            elif self.path == '/update/local_stargate_address':
+                 continue_to_save = True
+-                # Parse the address
+                 try:
+-                    address = [ data['S1'], data['S2'], data['S3'], data['S4'], data['S5'], data['S6'] ]
++                    address = [data['S1'], data['S2'], data['S3'], data['S4'], data['S5'], data['S6']]
+                 except KeyError:
+-                    data = { "success": False, "error": "Required fields missing or invalid request" }
++                    data = {"success": False, "error": "Required fields missing or invalid request"}
+                     continue_to_save = False
+ 
+-                # Validate that this is an acceptable address
+                 if continue_to_save:
+-                    verify_avail, error, entry = self.stargate.addr_manager.verify_address_available(address) # pylint: disable=unused-variable
++                    verify_avail, error, entry = self.stargate.addr_manager.verify_address_available(address)  # pylint: disable=unused-variable
+                     if verify_avail == "VERIFY_OWNED":
+-                        # This address is in use by a fan gate, but someone might be (re)configuring their own gate.
+                         try:
+                             if data['owner_confirmed']:
+-                                pass # Valid, continue to save
++                                pass
+                             else:
+-                                data = { "success": False, "error": error }
++                                data = {"success": False, "error": error}
+                                 continue_to_save = False
+                         except KeyError:
+-                            data = { "success": False, "extend": "owner_unconfirmed", "error": "This address is in use by a Fan Gate - \"{entry['name']}\"" }
++                            data = {
++                                "success": False,
++                                "extend": "owner_unconfirmed",
++                                "error": f'This address is in use by a Fan Gate - "{entry["name"]}"'
++                            }
+                             continue_to_save = False
+                     elif verify_avail is False:
+-                        # This address is in use by a standard gate
+-                        data = { "success": False, "error": error }
++                        data = {"success": False, "error": error}
+                         continue_to_save = False
+-                    else:
+-                        pass # Address not in use, clear to proceed
+ 
+-                # Store the address:
+                 if continue_to_save:
+                     self.stargate.addr_manager.get_book().set_local_address(address)
+-                    data = { "success": True, "message": "There are no conflicts with your chosen address.<br><br>Local Address Saved." }
++                    data = {
++                        "success": True,
++                        "message": "There are no conflicts with your chosen address.<br><br>Local Address Saved."
++                    }
+ 
+             elif self.path == '/update/subspace_ip':
+                 try:
+                     self.stargate.subspace_client.set_ip_address(data['ip'])
+-                    data = { "success": True, "message": "Subspace IP Address Saved." }
+-                except ValueError as ex:
+-                    data = { "success": False, "message": str(ex) }
++                    data = {"success": True, "message": "Subspace IP Address Saved."}
++                except ValueError as exc:
++                    data = {"success": False, "message": str(exc)}
+ 
+             elif self.path == '/update/config':
+                 try:
+                     message = self.stargate.cfg.set_bulk(data)
+-                    data = { "success": True, "message": "Configuration Saved", "results": message }
+-                except (NameError, ValueError) as ex:
+-                    data = { "success": False, "message": str(ex) }
++                    data = {"success": True, "message": "Configuration Saved", "results": message}
++                except (NameError, ValueError) as exc:
++                    data = {"success": False, "message": str(exc)}
+ 
+             else:
+-                # Unknown path, send 404
+                 self.send_response(404, 'Not Found')
+                 self.end_headers()
+                 return
+ 
+-            # If we have data, send it, else send a bare 200 OK
+             if data:
+                 self.send_json_response(data)
+             else:
+@@ -363,17 +574,31 @@
+ 
+             return
+ 
+-        except: # pylint: disable=bare-except
+-            if self.stargate.cfg.get("control_api_debug_enable"): # pylint: disable=no-member
++        except:  # pylint: disable=bare-except
++            if self.stargate.cfg.get("control_api_debug_enable"):  # pylint: disable=no-member
+                 raise
+ 
+-            # Encountered an exception: send a 500
+             self.send_response(500, "Exception")
+             self.end_headers()
+ 
+     def send_json_response(self, data):
+-        content = json.dumps( data )
++        content = json.dumps(data)
+         self.send_response(200, 'OK')
+-        self.send_header("Content-type", "text/json")
++        self.send_header("Content-type", "application/json")
++        self.send_header("Access-Control-Allow-Origin", "*")
++        self.send_header("Access-Control-Allow-Headers", 'Authorization, Content-Type')
++        self.send_header("Access-Control-Allow-Methods", 'POST, GET')
+         self.end_headers()
+         self.wfile.write(content.encode())
++
++    def get_home_dial_path(self):
++        try:
++            page = self.stargate.cfg.get("web_home_redirect_page")
++        except Exception:
++            page = "retro/dial.html"
++
++        if page not in ("retro/dial.html", "retro/dial9.html"):
++            page = "retro/dial.html"
++
++        return "/" + page
++
+diff -ruN original/test/dhd_test.py upgraded/test/dhd_test.py
+--- original/test/dhd_test.py	2026-05-14 20:20:25
++++ upgraded/test/dhd_test.py	2026-05-03 10:16:59
+@@ -1,75 +1,77 @@
+-from classes.DHD import DHDv2
+-from time import sleep
+-
+-# Initiate the DHD object.
+-dhd_port = "/dev/serial/by-id/usb-Adafruit_ItsyBitsy_32u4_5V_16MHz_HIDPC-if00"
+-dhd_serial_baud_rate = 115200
+-dhd = DHDv2(dhd_port, dhd_serial_baud_rate)
+-dhd.setBrightnessCenter(100)
+-dhd.setBrightnessSymbols(3)
+-dhd.setAllPixelsToColor(0, 0, 0)
+-dhd.latch()
+-
+-# Run through all the DHD key lights
+-for led in reversed(range(1, 39,)):
+-    dhd.setPixel_use_LED_id(led, 250, 117, 0)
+-    dhd.latch()
+-    sleep(0.15)
+-    dhd.setPixel_use_LED_id(led, 0, 0, 0)
+-    dhd.latch()
+-# The centre button
+-dhd.setPixel_use_LED_id(0, 255, 0, 0)
+-dhd.latch()
+-sleep(2)
+-dhd.clearAllPixels()
+-dhd.latch()
+-
+-## the dictionary containing the key to symbol-number relations. https://thestargateproject.com/symbols_overview.pdf
+-key_symbol_map = {'8':1, 'C':2, 'V':3, 'U':4, 'a':5, '3':6, '5':7, 'S':8, 'b':9, 'K':10, 'X':11, 'Z':12,
+-                  'E':14, 'P':15, 'M':16, 'D':17, 'F':18, '7':19, 'c':20, 'W':21, '6':22, 'G':23, '4':24,
+-                  'B':25, 'H':26, 'R':27, 'L':28, '2':29, 'N':30, 'Q':31, '9':32, 'J':33, '0':34, 'O':35,
+-                  'T':36, 'Y':37, '1':38, 'I':39, 'A':0
+-                  }
+-def ask_for_input():
+-    """
+-    This function collects key inputs from the user, and does actions based on input.
+-    :return: Nothing is returned
+-    """
+-    def key_press():
+-        """
+-        This helper function stops the program (thread) and waits for a single keypress.
+-        :return: The pressed key is returned.
+-        """
+-        import sys, tty, termios
+-        fd = sys.stdin.fileno()
+-        old_settings = termios.tcgetattr(fd)
+-        try:
+-            tty.setraw(sys.stdin.fileno())
+-            ch = sys.stdin.read(1)
+-        finally:
+-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+-        return ch
+-
+-    active = [] # keep a list of pressed DHD keys.
+-    while True:  # Keep running
+-        key = key_press()  # Save the input as a variable
+-
+-        # convert key press to symbol_number. https://thestargateproject.com/symbols_overview.pdf
+-        symbol_number = key_symbol_map[str(key)]
+-
+-        # Toggle the light for the pressed key
+-        if symbol_number not in active:
+-            active.append(symbol_number)
+-            if symbol_number == 0:
+-                dhd.setPixel(symbol_number, 255, 0, 0)
+-                dhd.latch()
+-            else:
+-                dhd.setPixel(symbol_number, 250, 117, 0)
+-                dhd.latch()
+-        else:
+-            active.remove(symbol_number)
+-            dhd.setPixel(symbol_number, 0, 0, 0)
+-            dhd.latch()
+-
+-# Run the DHD test script!
++#!/usr/bin/env python3
++from classes.DHD import DHDv2
++from time import sleep
++
++# Initiate the DHD object.
++dhd_port = "/dev/serial/by-id/usb-Adafruit_ItsyBitsy_32u4_5V_16MHz_HIDPC-if00"
++dhd_serial_baud_rate = 115200
++dhd = DHDv2(dhd_port, dhd_serial_baud_rate)
++
++# Brightness + clear
++dhd.setBrightnessCenter(100)
++dhd.setBrightnessSymbols(3)
++dhd.setAllPixelsToColor(0, 0, 0)
++dhd.latch()
++
++# Run through all the DHD key lights (by LED ID)
++for led_id in reversed(range(1, 39)):
++    dhd.setPixel_use_LED_id(led_id, 250, 117, 0)
++    dhd.latch()
++    sleep(0.15)
++    dhd.setPixel_use_LED_id(led_id, 0, 0, 0)
++    dhd.latch()
++
++# Centre button (LED ID 0)
++dhd.setPixel_use_LED_id(0, 255, 0, 0)
++dhd.latch()
++sleep(2)
++dhd.setAllPixelsToColor(0, 0, 0)
++dhd.latch()
++
++# Key -> LED ID map (your original map already matches LED IDs: 1..38 and center 0)
++key_led_id_map = {
++    '8':1, 'C':2, 'V':3, 'U':4, 'a':5, '3':6, '5':7, 'S':8, 'b':9, 'K':10, 'X':11, 'Z':12,
++    'E':14, 'P':15, 'M':16, 'D':17, 'F':18, '7':19, 'c':20, 'W':21, '6':22, 'G':23, '4':24,
++    'B':25, 'H':26, 'R':27, 'L':28, '2':29, 'N':30, 'Q':31, '9':32, 'J':33, '0':34, 'O':35,
++    'T':36, 'Y':37, '1':38, 'I':39, 'A':0
++}
++
++def ask_for_input():
++    """
++    Toggle LEDs by LED ID (NOT pixel index). This keeps inner/outer ring correct.
++    """
++    def key_press():
++        import sys, tty, termios
++        fd = sys.stdin.fileno()
++        old_settings = termios.tcgetattr(fd)
++        try:
++            tty.setraw(fd)
++            ch = sys.stdin.read(1)
++        finally:
++            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
++        return ch
++
++    active = set()  # active LED IDs
++
++    while True:
++        key = key_press()
++
++        if key not in key_led_id_map:
++            # ignore unknown keys
++            continue
++
++        led_id = key_led_id_map[key]
++
++        if led_id not in active:
++            active.add(led_id)
++            if led_id == 0:
++                dhd.setPixel_use_LED_id(0, 255, 0, 0)
++            else:
++                dhd.setPixel_use_LED_id(led_id, 250, 117, 0)
++            dhd.latch()
++        else:
++            active.remove(led_id)
++            dhd.setPixel_use_LED_id(led_id, 0, 0, 0)
++            dhd.latch()
++
+ ask_for_input()
+\ No newline at end of file
+diff -ruN original/test/dhd_test_from_config.py upgraded/test/dhd_test_from_config.py
+--- original/test/dhd_test_from_config.py	1969-12-31 18:00:00
++++ upgraded/test/dhd_test_from_config.py	2026-05-03 10:16:59
+@@ -0,0 +1,386 @@
++#!/usr/bin/env python3
++# -*- coding: utf-8 -*-
++
++"""
++DHD LED Test using milkyway-config.json
++
++- Uses the same DHD settings as the Stargate (serial port, colors)
++- For tests, forces brightness to ~75% of max (about 191/255)
++- Does NOT modify any original project files
++- Tests included:
++  1. Center pixel test
++  2. Brightness sweep (symbols)
++  3. Full-ring gradient
++  4. Ring chase (snake effect)
++  5. Random strobe
++"""
++
++import os
++import sys
++import colorsys
++import time
++import json
++import random
++
++# ----------------------------------------------------------------------
++# Global test brightness (~75% of 255)
++# ----------------------------------------------------------------------
++TEST_BRIGHTNESS = int(255 * 0.75)  # 191
++
++
++# ----------------------------------------------------------------------
++# 1. Fix sys.path so that "classes" can be imported
++# ----------------------------------------------------------------------
++
++THIS_DIR = os.path.dirname(os.path.abspath(__file__))       # …/sg1_v4/test
++PROJECT_ROOT = os.path.dirname(THIS_DIR)                    # …/sg1_v4
++
++if PROJECT_ROOT not in sys.path:
++    sys.path.insert(0, PROJECT_ROOT)
++
++# Import using the same structure as the main Stargate code
++from classes.StargateMilkyWay.dialers import DHDv2  # type: ignore
++
++
++# ----------------------------------------------------------------------
++# 2. Simple logger compatible with Stargate logging calls
++# ----------------------------------------------------------------------
++
++class DummyLog:
++    def log(self, msg: str):
++        print(f"[LOG] {msg}")
++
++
++# ----------------------------------------------------------------------
++# 3. Load milkyway-config.json
++# ----------------------------------------------------------------------
++
++CONFIG_PATH = os.path.join(PROJECT_ROOT, "config", "milkyway-config.json")
++
++def load_config() -> dict:
++    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
++        return json.load(f)
++
++
++# ----------------------------------------------------------------------
++# 4. Create DHDv2 instance using the config
++# ----------------------------------------------------------------------
++
++def create_dhd():
++    cfg = load_config()
++    log = DummyLog()
++
++    # Serial port and baud rate
++    port = cfg["dhd_serial_port"]["value"]
++    baud = cfg["dhd_serial_baud_rate"]["value"]
++
++    log.log(f"Using DHD port: {port}")
++    log.log(f"Using baud rate: {baud}")
++
++    dhd = DHDv2(port, baud, log)
++
++    # Brightness from config (for info only)
++    brightness_center_cfg = cfg["dhd_brightness_center"]["value"]
++    brightness_symbols_cfg = cfg["dhd_brightness_symbols"]["value"]
++    log.log(
++        f"Config brightness: center={brightness_center_cfg}, "
++        f"symbols={brightness_symbols_cfg}"
++    )
++
++    # Force test brightness to ~75% of max
++    dhd.set_brightness_center(TEST_BRIGHTNESS)
++    dhd.set_brightness_symbols(TEST_BRIGHTNESS)
++    log.log(f"TEST brightness set to {TEST_BRIGHTNESS} (~75% of 255)")
++
++    # Colors from config
++    center_color = (
++        cfg["dhd_color_center_red"]["value"],
++        cfg["dhd_color_center_green"]["value"],
++        cfg["dhd_color_center_blue"]["value"],
++    )
++    symbols_color = (
++        cfg["dhd_color_symbols_red"]["value"],
++        cfg["dhd_color_symbols_green"]["value"],
++        cfg["dhd_color_symbols_blue"]["value"],
++    )
++
++    dhd.set_color_center(center_color)
++    dhd.set_color_symbols(symbols_color)
++    log.log(f"Set center color:  {center_color}")
++    log.log(f"Set symbols color: {symbols_color}")
++
++    # Clear LEDs on startup
++    dhd.clear_all_pixels()
++    dhd.latch()
++
++    return dhd, log
++
++
++# ----------------------------------------------------------------------
++# 5. LED Tests
++# ----------------------------------------------------------------------
++
++def test_center_pixel(dhd: DHDv2, log: DummyLog):
++    log.log("Test 1: Center pixel ON (using config color)")
++    dhd.clear_all_pixels()
++    dhd.set_center_on()
++    time.sleep(2)
++    dhd.clear_all_pixels()
++    dhd.latch()
++    time.sleep(0.5)
++
++
++def test_brightness_sweep(dhd: DHDv2, log: DummyLog):
++    log.log("Test 2: Brightness sweep (symbols)")
++
++    dhd.clear_all_pixels()
++    test_color = (255, 100, 0)  # Color used during brightness stepping
++
++    # Sweep up to TEST_BRIGHTNESS (75% of max), not 255
++    steps = [10, 40, 80, 120, 160, TEST_BRIGHTNESS]
++
++    for b in steps:
++        log.log(f"  brightness_symbols = {b}")
++        dhd.set_brightness_symbols(b)
++        dhd.set_all_pixels_to_color(*test_color)
++        dhd.latch()
++        time.sleep(1.0)
++
++    # Restore base test brightness
++    dhd.set_brightness_symbols(TEST_BRIGHTNESS)
++    dhd.clear_all_pixels()
++    dhd.latch()
++    time.sleep(0.5)
++    
++
++def test_individual_leds(dhd: DHDv2, log: DummyLog):
++    """
++    Test 6: Individual LED RGB test
++
++    Each LED is turned on one by one:
++      - Red for 1.5s
++      - Green for 1.5s
++      - Blue for 1.5s
++    Then we move to the next LED, until all LEDs on the DHD are tested.
++    """
++
++    log.log("Test 6: Individual LED RGB test")
++
++    count = dhd.get_pixel_count()
++    if count <= 0:
++        log.log("  ERROR: get_pixel_count() == 0. Aborting.")
++        return
++
++    # Loop through all LEDs on the DHD
++    for idx in range(count):
++        # For each LED, show R, G, B for 1.5s each
++        for (r, g, b, color_name) in [
++            (255, 0,   0,   "RED"),
++            (0,   255, 0,   "GREEN"),
++            (0,   0,   255, "BLUE"),
++        ]:
++            log.log(f"  LED {idx}: {color_name}")
++            dhd.clear_all_pixels()
++            dhd.set_pixel_use_led_id(idx, r, g, b)
++            dhd.latch()
++            time.sleep(1.5)
++
++    # Cleanup at the end
++    dhd.clear_all_pixels()
++    dhd.latch()
++    time.sleep(0.5)
++
++    
++def test_gradient(dhd: DHDv2, log: DummyLog):
++    log.log("Test 3: Full-ring hue rainbow gradient")
++
++    count = dhd.get_pixel_count()
++    log.log(f"  Pixel count reported by DHD: {count}")
++
++    if count <= 0:
++        log.log("  ERROR: get_pixel_count() == 0. Aborting gradient test.")
++        return
++
++    dhd.clear_all_pixels()
++
++    for i in range(count):
++        # Hue from 0.0 to 1.0 – full 360°
++        h = i / max(1, count - 1)   # 0.0 .. 1.0
++        s = 1.0                     # full saturation
++        v = 1.0                     # full brightness (scaled by TEST_BRIGHTNESS)
++
++        r_f, g_f, b_f = colorsys.hsv_to_rgb(h, s, v)
++        r = int(r_f * 255)
++        g = int(g_f * 255)
++        b = int(b_f * 255)
++
++        dhd.set_pixel_use_led_id(i, r, g, b)
++
++    dhd.latch()
++    time.sleep(6)
++
++    dhd.clear_all_pixels()
++    dhd.latch()
++    time.sleep(0.5)
++
++
++def test_ring_chase(dhd: DHDv2, log: DummyLog):
++    log.log("Test 4: Ring chase (one rotation per color)")
++
++    count = dhd.get_pixel_count()
++    if count <= 0:
++        log.log("  ERROR: get_pixel_count() == 0. Aborting.")
++        return
++
++    tail = 4  # fading trail
++
++    colors = [
++        (255, 0, 0),     # red
++        (0, 255, 0),     # green
++        (0, 0, 255),     # blue
++        (240, 200, 0),   # yellow
++        (180, 180, 180)  # white
++    ]
++
++    # --- Now one full loop for each color ---
++    for color in colors:
++
++        log.log(f"  Ring chase color: {color}")
++
++        for head in range(count):
++            dhd.clear_all_pixels()
++
++            for i in range(tail):
++                idx = (head - i) % count
++                fade = max(0.2, 1.0 - i / tail)
++                r = int(color[0] * fade)
++                g = int(color[1] * fade)
++                b = int(color[2] * fade)
++
++                dhd.set_pixel_use_led_id(idx, r, g, b)
++
++            dhd.latch()
++            time.sleep(0.05)
++
++    dhd.clear_all_pixels()
++    dhd.latch()
++    time.sleep(0.5)
++
++
++def test_random_strobe(dhd: DHDv2, log: DummyLog):
++    log.log("Test 5: Random strobe")
++
++    count = dhd.get_pixel_count()
++    iterations = 80
++
++    for _ in range(iterations):
++        dhd.clear_all_pixels()
++
++        for _ in range(random.randint(4, 10)):
++            idx = random.randint(0, max(0, count - 1))
++            color = random.choice([
++                (255, 0, 0),       # red
++                (0, 255, 0),       # green
++                (0, 0, 255),       # blue
++                (255, 255, 0),     # yellow
++                (255, 255, 255),   # white
++            ])
++            dhd.set_pixel_use_led_id(idx, *color)
++
++        dhd.latch()
++        time.sleep(0.05)
++
++    dhd.clear_all_pixels()
++    dhd.latch()
++    time.sleep(0.5)
++
++
++# ----------------------------------------------------------------------
++# 6. main()
++# ----------------------------------------------------------------------
++
++def main():
++    print("=== DHD LED Test using milkyway-config.json ===")
++    print("Make sure stargate.service is stopped (serial must be free).")
++
++    dhd, log = create_dhd()
++
++    try:
++        test_center_pixel(dhd, log)
++        test_brightness_sweep(dhd, log)
++        test_individual_leds(dhd, log)
++        test_gradient(dhd, log)
++        test_ring_chase(dhd, log)
++        test_random_strobe(dhd, log)
++
++        log.log("All tests completed.")
++    finally:
++        log.log("Clearing DHD...")
++        dhd.clear_all_pixels()
++        dhd.latch()
++        time.sleep(0.5)
++
++
++if __name__ == "__main__":
++    main()
++
++
++# ===== BACKEND FOR WEB-TRIGGERED LED TEST =====
++
++class dhd_led_test_backend:
++    """Backend used when the test is triggered from the web UI (debug.htm)."""
++
++    @staticmethod
++    def run_dhd_test(dhd, log, mode="full"):
++        log.log(f"=== DHD LED TEST BACKEND START (mode={mode}) ===")
++
++        try:
++            # Force brightness for web-triggered tests as well
++            try:
++                dhd.set_brightness_center(TEST_BRIGHTNESS)
++                dhd.set_brightness_symbols(TEST_BRIGHTNESS)
++                log.log(
++                    f"DHD LED TEST: brightness set to {TEST_BRIGHTNESS} (~75% of 255)"
++                )
++            except Exception as e_b:
++                log.log(f"DHD LED TEST: could not set brightness: {e_b}")
++
++            if mode == "center":
++                test_center_pixel(dhd, log)
++
++            elif mode == "brightness":
++                test_brightness_sweep(dhd, log)
++
++            elif mode == "gradient":
++                test_gradient(dhd, log)
++
++            elif mode == "ring_chase":
++                test_ring_chase(dhd, log)
++
++            elif mode == "random_strobe":
++                test_random_strobe(dhd, log)
++
++            elif mode == "individual":
++                test_individual_leds(dhd, log)
++
++            else:
++                # "full" or unknown -> run complete suite
++                test_center_pixel(dhd, log)
++                test_brightness_sweep(dhd, log)
++                test_gradient(dhd, log)
++                test_ring_chase(dhd, log)
++                test_random_strobe(dhd, log)
++                test_individual_leds(dhd, log)
++
++            log.log("=== DHD LED TEST BACKEND DONE ===")
++
++        except Exception as e:
++            log.log(f"DHD TEST BACKEND ERROR: {e}")
++
++        finally:
++            # Always clear LEDs at the end, even on error.
++            try:
++                dhd.clear_all_pixels()
++                dhd.latch()
++            except Exception as e2:
++                log.log(f"DHD TEST BACKEND CLEANUP ERROR: {e2}")
+diff -ruN original/web/debug.htm upgraded/web/debug.htm
+--- original/web/debug.htm	2026-05-14 20:20:25
++++ upgraded/web/debug.htm	2026-05-06 21:57:02
+@@ -1,145 +1,591 @@
+-<!--
+-*******************************************************************
+-***   Kristian's Stargate Project - TheStargateProject.com      ***
+-*******************************************************************
+-***                                                             ***
+-***   Original Software written by Kristian Tysse               ***
+-***   Restructuring and Development by Jonathan Moyes           ***
+-***                                                             ***
+-*******************************************************************
+--->
+-
+-<!doctype html>
+-<html lang="en">
+-  <head>
+-    <meta charset="utf-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+-    <meta name="author" content="Jonathan Moyes">
+-    <link rel="shortcut icon" type="image/x-icon" href="img/favicon.ico"/>
+-
+-    <title>Testing & Debug | Stargate Command</title>
+-
+-    <!-- Bootstrap core CSS -->
+-    <link rel="stylesheet" href="lib/jquery-ui-1.13.0.custom/jquery-ui.min.css">
+-    <link href="lib/bootstrap-5/css/bootstrap.min.css" rel="stylesheet">
+-
+-    <script type="text/javascript" src="lib/jquery-3.3.1.min.js"></script>
+-    <script type="text/javascript" src="lib/jquery-ui-1.13.0.custom/jquery-ui.min.js"></script>
+-
+-    <!-- Custom styles for this template -->
+-    <link rel="stylesheet" href="main.css" />
+-
+-  </head>
+-
+-  <body>
+-
+-    <script type="text/javascript">
+-
+-      $( function() {
+-        initialize_button_handlers()
+-        doPoll();
+-      })
+-
+-    </script>
+-
+-    <nav class="navbar navbar-expand-md navbar-dark bg-dark fixed-top">
+-      <a class="navbar-brand" href="/">Stargate Command</a>
+-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarsExampleDefault" aria-controls="navbarsExampleDefault" aria-expanded="false" aria-label="Toggle navigation">
+-        <span class="navbar-toggler-icon"></span>
+-      </button>
+-
+-      <div class="collapse navbar-collapse" id="navbarsExampleDefault">
+-        <ul class="navbar-nav mr-auto">
+-          <li class="nav-item">
+-            <a class="nav-link" href="index.htm">Home</a>
+-          </li>
+-          <li class="nav-item">
+-            <a class="nav-link" href="address_book.htm">Address Book</a>
+-          </li>
+-          <li class="nav-item">
+-            <a class="nav-link" href="symbol_overview.htm">Symbols</a>
+-          </li>
+-          <li class="nav-item dropdown">
+-            <a class="nav-link dropdown-toggle" href="#" id="dropdown01" role="button" data-bs-toggle="dropdown" aria-expanded="false">Admin</a>
+-            <div class="dropdown-menu" aria-labelledby="dropdown01">
+-              <a class="dropdown-item active" href="#">Testing / Debug</a>
+-              <a class="dropdown-item" href="sound_board.htm">Sound Board</a>
+-              <a><hr></a>
+-              <a class="dropdown-item" href="config.htm">Configuration</a>
+-              <a class="dropdown-item" href="info.htm">System Information</a>
+-              <a><hr></a>
+-              <a class="dropdown-item" href="#" onClick="software_restart()">Restart Software</a>
+-              <a class="dropdown-item" href="#" onClick="host_reboot()">Reboot Raspberry Pi</a>
+-              <a class="dropdown-item" href="#" onClick="host_shutdown()">Shutdown Raspberry Pi</a>
+-            </div>
+-          </li>
+-          <li class="nav-item">
+-            <a class="nav-link" href="help.htm">Help</a>
+-          </li>
+-        </ul>
+-      </div>
+-    </nav>
+-
+-    <div class='header_image_container'>
+-      <img class='header_image' src="img/header.jpg" alt="">
+-    </div>
+-
+-    <main role="main" class="container">
+-
+-      <div class="debug_button_container">
+-
+-        <h4>Symbol Ring</h4>
+-        <button type="button" class="btn-secondary controlButton" action="symbol_forward">Forward</button>
+-        <button type="button" class="btn-secondary controlButton" action="symbol_backward">Backward</button>
+-        <button type="button" class="btn-secondary controlButton" action="set_glyph_ring_zero">Set Position=0 (Earth at top)</button>
+-
+-        <hr />
+-
+-        <h4>Lighting Control </h4>
+-        <button type="button" class="btn-secondary controlButton" action="all_chevron_leds_on">All Chevrons On</button>
+-        <button type="button" class="btn-secondary controlButton" action="all_chevron_leds_off">All Chevrons Off</button>
+-
+-        <hr />
+-        <h4>Wormhole Manual Control</h4>
+-        <button type="button" class="btn-secondary controlButton" action="wormhole_on">Open Wormhole</button>
+-        <button type="button" class="btn-secondary controlButton" action="wormhole_off">Close Wormhole</button>
+-
+-        <hr />
+-        <h4>Cycle Chevrons (Motors, Lights, Sound)</h4>
+-        <button type="button" class="btn-secondary cycleChevronButton" chevron_number='1'>Chevron 1</button>
+-        <button type="button" class="btn-secondary cycleChevronButton" chevron_number='2'>Chevron 2</button>
+-        <button type="button" class="btn-secondary cycleChevronButton" chevron_number='3'>Chevron 3</button>
+-        <button type="button" class="btn-secondary cycleChevronButton" chevron_number='4'>Chevron 4</button>
+-        <button type="button" class="btn-secondary cycleChevronButton" chevron_number='5'>Chevron 5</button>
+-        <button type="button" class="btn-secondary cycleChevronButton" chevron_number='6'>Chevron 6</button>
+-        <button type="button" class="btn-secondary cycleChevronButton" chevron_number='7'>Chevron 7</button>
+-        <button type="button" class="btn-secondary cycleChevronButton" chevron_number='8'>Chevron 8</button>
+-        <button type="button" class="btn-secondary cycleChevronButton" chevron_number='9'>Chevron 9</button>
+-
+-        <hr />
+-        <h4>Sound & Volume</h4>
+-        <button type="button" class="btn-secondary controlButton" action="volume_down">Volume Down</button>
+-        <button type="button" class="btn-secondary controlButton" action="volume_up">Volume Up</button>
+-
+-        <hr />
+-        <h4>Simulate</h4>
+-        <button type="button" class="btn-secondary controlButton" action="simulate_incoming">Incoming Wormhole</button>
+-        <button type="button" class="btn-secondary controlButton" action="wormhole_off">Disconnect</button>
+-
+-        <hr />
+-        <h4>Dial Home Device</h4>
+-        <button type="button" class="btn-secondary controlButton" action="dhd_test_enable">Test Mode<br>Enable</button>
+-        <button type="button" class="btn-secondary controlButton" action="dhd_test_disable">Test Mode<br>Disable</button>
+-      </div><!-- /. button container -->
+-    </main><!-- /.container -->
+-
+-    <!-- Bootstrap core JavaScript
+-    ================================================== -->
+-    <!-- Placed at the end of the document so the pages load faster -->
+-    
+-    <script src="/lib/bootstrap-5/js/bootstrap.bundle.min.js"></script>
+-    <script src="/js/top_menu.js"></script>
+-    <script src="/js/gate_offline_polling.js"></script>
+-    <script src="/js/debug.js"></script>
+-  </body>
+-</html>
++<!--
++*******************************************************************
++***   Kristian's Stargate Project - TheStargateProject.com      ***
++*******************************************************************
++***                                                             ***
++***   Original Software written by Kristian Tysse               ***
++***   Restructuring and Development by Jonathan Moyes           ***
++***                                                             ***
++*******************************************************************
++-->
++
++<!doctype html>
++<html lang="en">
++  <head>
++    <meta charset="utf-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
++    <meta name="author" content="Jonathan Moyes">
++    <link rel="shortcut icon" type="image/x-icon" href="img/favicon.ico"/>
++
++    <title>Testing & Debug | Stargate Command</title>
++
++    <!-- Bootstrap core CSS -->
++    <link rel="stylesheet" href="lib/jquery-ui-1.13.0.custom/jquery-ui.min.css">
++    <link href="lib/bootstrap-5/css/bootstrap.min.css" rel="stylesheet">
++
++    <script type="text/javascript" src="lib/jquery-3.3.1.min.js"></script>
++    <script type="text/javascript" src="lib/jquery-ui-1.13.0.custom/jquery-ui.min.js"></script>
++
++    <!-- Custom styles for this template -->
++    <link rel="stylesheet" href="main.css" />
++
++    <style>
++      .volume-meter-wrap {
++        display: flex;
++        flex-direction: column;
++        align-items: flex-start;
++        gap: 10px;
++      }
++
++      .volume-buttons-wrap {
++        display: flex;
++        flex-wrap: wrap;
++        gap: 10px;
++        align-items: center;
++        justify-content: flex-start;
++      }
++
++      .volume-meter-panel {
++        display: flex;
++        flex-direction: column;
++        gap: 6px;
++        width: auto;
++        align-items: flex-start;
++      }
++
++      .volume-meter-shell {
++        padding: 0;
++        width: auto;
++        margin-left: 14px;
++      }
++
++      .volume-meter {
++        display: flex;
++        flex-wrap: nowrap;
++        gap: 3px;
++        align-items: center;
++        justify-content: flex-start;
++        width: auto;
++        min-height: 26px;
++      }
++
++      .volume-seg {
++        width: 10px;
++        min-width: 10px;
++        height: 20px;
++        border-radius: 2px;
++        background: rgba(255, 255, 255, 0.06);
++        border: 1px solid rgba(255, 255, 255, 0.10);
++        box-sizing: border-box;
++        opacity: 0.18;
++        transition:
++          opacity 0.14s ease,
++          transform 0.14s ease,
++          box-shadow 0.14s ease,
++          filter 0.14s ease,
++          background 0.14s ease,
++          border-color 0.14s ease;
++      }
++
++      .volume-seg.on {
++        opacity: 1;
++      }
++
++      .volume-seg.on.tone-low {
++        background: linear-gradient(to bottom, #ffe975 0%, #ffd43b 100%);
++        border-color: rgba(255, 229, 116, 0.95);
++        box-shadow:
++          0 0 8px rgba(255, 212, 59, 0.65),
++          0 0 18px rgba(255, 212, 59, 0.28);
++      }
++
++      .volume-seg.on.tone-mid {
++        background: linear-gradient(to bottom, #ffb85a 0%, #ff9322 100%);
++        border-color: rgba(255, 177, 89, 0.95);
++        box-shadow:
++          0 0 8px rgba(255, 147, 34, 0.68),
++          0 0 18px rgba(255, 147, 34, 0.30);
++      }
++
++      .volume-seg.on.tone-high {
++        background: linear-gradient(to bottom, #ff6f3d 0%, #ff4c10 100%);
++        border-color: rgba(255, 122, 76, 0.95);
++        box-shadow:
++          0 0 10px rgba(255, 76, 16, 0.70),
++          0 0 20px rgba(255, 76, 16, 0.34);
++      }
++
++      .volume-seg.on.tone-max {
++        background: linear-gradient(to bottom, #a11414 0%, #4b0000 100%);
++        border-color: rgba(166, 46, 46, 0.95);
++        box-shadow:
++          0 0 10px rgba(139, 0, 0, 0.68),
++          0 0 20px rgba(139, 0, 0, 0.30);
++      }
++
++      .volume-seg.pulse {
++        animation: volumePulse 0.28s ease-out;
++      }
++
++      @keyframes volumePulse {
++        0% {
++          transform: scale(1);
++          filter: brightness(1);
++        }
++        35% {
++          transform: scale(1.08);
++          filter: brightness(1.32);
++        }
++        100% {
++          transform: scale(1);
++          filter: brightness(1);
++        }
++      }
++
++      .volume-meter-footer {
++        display: flex;
++        justify-content: flex-start;
++        align-items: center;
++        width: auto;
++      }
++
++      .volume-meter-label {
++        font-size: 12px;
++        color: #ffffff;
++        user-select: none;
++        text-align: right;
++        letter-spacing: 0.5px;
++      }
++
++      .wormhole-dialog-buttons {
++        display: flex;
++        flex-direction: column;
++        gap: 12px;
++      }
++
++      .wormhole-dialog-buttons .btn-secondary {
++        width: 100%;
++      }
++    </style>
++
++    <script type="text/javascript">
++      $(function() {
++        initialize_button_handlers();
++        doPoll();
++      });
++    </script>
++  </head>
++
++  <body>
++
++    <nav class="navbar navbar-expand-md navbar-dark bg-dark fixed-top">
++      <a class="navbar-brand" href="/">Stargate Command</a>
++      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarsExampleDefault" aria-controls="navbarsExampleDefault" aria-expanded="false" aria-label="Toggle navigation">
++        <span class="navbar-toggler-icon"></span>
++      </button>
++
++      <div class="collapse navbar-collapse" id="navbarsExampleDefault">
++        <ul class="navbar-nav mr-auto">
++          <li class="nav-item">
++            <a class="nav-link" href="index.htm">Home</a>
++          </li>
++          <li class="nav-item">
++            <a class="nav-link" href="address_book.htm">Address Book</a>
++          </li>
++          <li class="nav-item">
++            <a class="nav-link" href="symbol_overview.htm">Symbols</a>
++          </li>
++          <li class="nav-item dropdown">
++            <a class="nav-link dropdown-toggle" href="#" id="dropdown01" role="button" data-bs-toggle="dropdown" aria-expanded="false">Admin</a>
++            <div class="dropdown-menu" aria-labelledby="dropdown01">
++              <a class="dropdown-item active" href="#">Testing / Debug</a>
++              <a class="dropdown-item" href="connection_history.htm">Connection History</a>
++              <a><hr></a>
++              <a class="dropdown-item" href="config.htm">Configuration</a>
++              <a class="dropdown-item" href="info.htm">System Information</a>
++              <a><hr></a>
++              <a class="dropdown-item" href="#" onClick="software_restart()">Restart Software</a>
++              <a class="dropdown-item" href="#" onClick="host_reboot()">Reboot Raspberry Pi</a>
++              <a class="dropdown-item" href="#" onClick="host_shutdown()">Shutdown Raspberry Pi</a>
++            </div>
++          </li>
++          <li class="nav-item">
++            <a class="nav-link" href="alarm_clock.htm">Alarm Clock</a>
++          </li>
++          <li class="nav-item">
++            <a class="nav-link" href="help.htm">Help</a>
++          </li>
++        </ul>
++      </div>
++    </nav>
++
++    <div class="header_image_container">
++      <img class="header_image" src="img/header.jpg" alt="">
++    </div>
++
++    <main role="main" class="container">
++
++      <div class="debug_button_container">
++
++        <h4>Symbol Ring</h4>
++        <button type="button" class="btn-secondary controlButton" action="symbol_forward">Forward</button>
++        <button type="button" class="btn-secondary controlButton" action="symbol_backward">Backward</button>
++        <button type="button" class="btn-secondary controlButton" action="set_glyph_ring_zero">Set Position=0 (Earth at top)</button>
++
++        <hr />
++
++        <h4>Lighting Control</h4>
++        <button type="button" class="btn-secondary controlButton" action="all_chevron_leds_on">All Chevrons On</button>
++        <button type="button" class="btn-secondary controlButton" action="all_chevron_leds_off">All Chevrons Off</button>
++        <button type="button" class="btn-secondary controlButton" action="white_on">White On</button>
++        <button type="button" class="btn-secondary controlButton" action="white_off">White Off</button>
++        <button type="button" class="btn-secondary controlButton" action="dhd_on">DHD ON</button>
++        <button type="button" class="btn-secondary controlButton" action="dhd_off">DHD OFF</button>
++
++        <hr />
++
++        <h4>Wormhole Manual Control</h4>
++        <button type="button" class="btn-secondary controlButton" id="openWormholeMenuButton">Open Wormhole</button>
++        <button type="button" class="btn-secondary controlButton" action="wormhole_off">Close Wormhole</button>
++
++        <div id="wormholePickerDialog" title="Select Wormhole Type" style="display:none;">
++          <div class="wormhole-dialog-buttons">
++            <button type="button" class="btn-secondary wormholeChoiceButton" data-action="wormhole_on">Standard Wormhole</button>
++            <button type="button" class="btn-secondary wormholeChoiceButton" data-action="dynamic_wormhole_on">Dynamic Wormhole</button>
++            <button type="button" class="btn-secondary wormholeChoiceButton" data-action="blackhole_on">Black Hole</button>
++          </div>
++        </div>
++
++        <hr />
++
++        <h4>Cycle Chevrons (Motors, Lights, Sound)</h4>
++        <button type="button" class="btn-secondary cycleChevronButton" chevron_number="1">Chevron 1</button>
++        <button type="button" class="btn-secondary cycleChevronButton" chevron_number="2">Chevron 2</button>
++        <button type="button" class="btn-secondary cycleChevronButton" chevron_number="3">Chevron 3</button>
++        <button type="button" class="btn-secondary cycleChevronButton" chevron_number="4">Chevron 4</button>
++        <button type="button" class="btn-secondary cycleChevronButton" chevron_number="5">Chevron 5</button>
++        <button type="button" class="btn-secondary cycleChevronButton" chevron_number="6">Chevron 6</button>
++        <button type="button" class="btn-secondary cycleChevronButton" chevron_number="7">Chevron 7</button>
++        <button type="button" class="btn-secondary cycleChevronButton" chevron_number="8">Chevron 8</button>
++        <button type="button" class="btn-secondary cycleChevronButton" chevron_number="9">Chevron 9</button>
++
++        <hr />
++
++        <h4>Sound & Volume</h4>
++
++        <div class="volume-meter-wrap">
++          <div class="volume-buttons-wrap">
++            <button type="button" class="btn-secondary controlButton" action="volume_up">Volume Up</button>
++            <button type="button" class="btn-secondary controlButton" action="volume_down">Volume Down</button>
++          </div>
++
++          <div class="volume-meter-panel">
++            <div class="volume-meter-shell">
++              <div id="volumeMeter" class="volume-meter" aria-label="Current volume level"></div>
++            </div>
++            <div class="volume-meter-footer">
++              <div id="volumeMeterLabel" class="volume-meter-label">VOL 0%</div>
++            </div>
++          </div>
++        </div>
++
++        <hr />
++
++        <h4>Simulate</h4>
++        <button type="button" class="btn-secondary controlButton" action="simulate_incoming">Incoming Wormhole</button>
++        <button type="button" class="btn-secondary controlButton" action="wormhole_off">Disconnect</button>
++        <label style="display:inline-flex; align-items:center; gap:25px; margin:0 0 8px 0;">
++          <input type="checkbox" id="incomingExtended" style="transform: scale(2.5);">
++        </label>
++
++        <hr />
++
++        <h4>Dial Home Device</h4>
++        <button type="button" id="dhdLedTestButton" class="btn-secondary controlButton">DHD LED Test<br>☏</button>
++        <button type="button" class="btn-secondary controlButton" action="dhd_test_enable">Test Mode<br>Enable</button>
++        <button type="button" class="btn-secondary controlButton" action="dhd_test_disable">Test Mode<br>Disable</button>
++
++      </div>
++    </main>
++
++    <!-- DHD LED TEST JS (dialog + POST to /do/dhd_led_test) -->
++    <script type="text/javascript">
++      function runDhdTest(mode) {
++        $.post({
++          url: 'stargate/do/dhd_led_test',
++          data: JSON.stringify({ mode: mode }),
++          contentType: 'application/json'
++        })
++        .done(function() {
++          $("<div>DHD LED test '" + mode + "' started. Check logs.</div>").dialog();
++        })
++        .fail(function() {
++          $("<div>Failed to start DHD LED test.</div>").dialog();
++        });
++      }
++
++      function openDhdTestDialog() {
++        var $dlg = $('<div title="Select DHD LED test">' +
++          '<p>Choose which DHD LED test you want to run:</p>' +
++          '<button class="dhdTestChoice" data-mode="full">Full suite</button><br>' +
++          '<button class="dhdTestChoice" data-mode="center">Center pixel only</button><br>' +
++          '<button class="dhdTestChoice" data-mode="brightness">Brightness sweep</button><br>' +
++          '<button class="dhdTestChoice" data-mode="gradient">Rainbow gradient</button><br>' +
++          '<button class="dhdTestChoice" data-mode="ring_chase">Ring chase</button><br>' +
++          '<button class="dhdTestChoice" data-mode="random_strobe">Random strobe</button><br>' +
++          '<button class="dhdTestChoice" data-mode="individual">Individual LED test</button>' +
++          '</div>');
++
++        $dlg.on('click', '.dhdTestChoice', function() {
++          var mode = $(this).data('mode');
++          $dlg.dialog('close');
++          runDhdTest(mode);
++        });
++
++        $dlg.dialog({
++          modal: true,
++          width: 350
++        });
++      }
++
++      function initialize_dhd_led_test_button() {
++        $('#dhdLedTestButton').off('click');
++
++        $('#dhdLedTestButton').on('click', function(e) {
++          e.preventDefault();
++          e.stopPropagation();
++          openDhdTestDialog();
++        });
++      }
++
++      $(function() {
++        initialize_dhd_led_test_button();
++      });
++    </script>
++
++    <!-- WORMHOLE PICKER -->
++    <script type="text/javascript">
++      function openWormholeAction(actionName) {
++        $.post('stargate/do/' + actionName)
++          .fail(function() {
++            $("<div>Failed to start wormhole.</div>").dialog();
++          });
++      }
++
++      function initialize_wormhole_picker() {
++        $('#openWormholeMenuButton').off('click').on('click', function(e) {
++          e.preventDefault();
++          e.stopPropagation();
++
++          $('#wormholePickerDialog').dialog({
++            modal: true,
++            width: 320,
++            resizable: false
++          });
++        });
++
++        $('.wormholeChoiceButton').off('click').on('click', function() {
++          var actionName = $(this).data('action');
++          $('#wormholePickerDialog').dialog('close');
++          openWormholeAction(actionName);
++        });
++      }
++
++      $(function() {
++        initialize_wormhole_picker();
++      });
++    </script>
++
++    <!-- REAL AUDIO VOLUME METER -->
++    <script type="text/javascript">
++      var lastVolumePercent = null;
++      var volumePollInterval = null;
++      var volumeActionInProgress = false;
++      var volumeRefreshToken = 0;
++      var TOTAL_SEGMENTS = 20;
++
++      function parseAudioVolume(rawValue) {
++        if (rawValue === undefined || rawValue === null) {
++          return null;
++        }
++
++        if (typeof rawValue === "number") {
++          return Math.max(0, Math.min(100, rawValue));
++        }
++
++        var text = String(rawValue).trim();
++        var match = text.match(/(\d+)/);
++
++        if (!match) {
++          return null;
++        }
++
++        var parsed = parseInt(match[1], 10);
++        if (isNaN(parsed)) {
++          return null;
++        }
++
++        return Math.max(0, Math.min(100, parsed));
++      }
++
++      function getToneClassByIndex(index) {
++        if (index < 5) {
++          return 'tone-low';
++        }
++        if (index < 10) {
++          return 'tone-mid';
++        }
++        if (index < 15) {
++          return 'tone-high';
++        }
++        return 'tone-max';
++      }
++
++      function buildVolumeMeter() {
++        var meter = document.getElementById('volumeMeter');
++        if (!meter) {
++          return;
++        }
++
++        meter.innerHTML = '';
++
++        for (var i = 0; i < TOTAL_SEGMENTS; i++) {
++          var seg = document.createElement('div');
++          seg.className = 'volume-seg';
++          seg.setAttribute('data-index', i);
++          seg.setAttribute('data-tone', getToneClassByIndex(i));
++          meter.appendChild(seg);
++        }
++      }
++
++      function drawVolumeMeter(percent, previousPercent) {
++        var segs = document.querySelectorAll('#volumeMeter .volume-seg');
++        if (!segs.length) {
++          return;
++        }
++
++        var lit = Math.round((percent / 100) * TOTAL_SEGMENTS);
++        lit = Math.max(0, Math.min(TOTAL_SEGMENTS, lit));
++
++        var prevLit = null;
++        if (previousPercent !== null && previousPercent !== undefined) {
++          prevLit = Math.round((previousPercent / 100) * TOTAL_SEGMENTS);
++          prevLit = Math.max(0, Math.min(TOTAL_SEGMENTS, prevLit));
++        }
++
++        segs.forEach(function(seg, idx) {
++          seg.classList.remove('on', 'pulse', 'tone-low', 'tone-mid', 'tone-high', 'tone-max');
++
++          if (idx < lit) {
++            seg.classList.add('on');
++            seg.classList.add(seg.getAttribute('data-tone'));
++          }
++        });
++
++        if (prevLit !== null && prevLit !== lit) {
++          if (lit > prevLit && lit > 0) {
++            segs[lit - 1].classList.add('pulse');
++          } else if (lit < prevLit && lit < segs.length) {
++            segs[Math.max(0, lit)].classList.add('pulse');
++          }
++        }
++
++        $('#volumeMeterLabel').text('VOL ' + percent + '%');
++      }
++
++      function refreshRealVolumeMeter(options) {
++        options = options || {};
++        var force = !!options.force;
++
++        if (volumeActionInProgress && !force) {
++          return;
++        }
++
++        var requestToken = ++volumeRefreshToken;
++
++        $.getJSON('stargate/get/system_info')
++          .done(function(data) {
++            if (requestToken !== volumeRefreshToken) {
++              return;
++            }
++
++            var percent = parseAudioVolume(data.audio_volume);
++            if (percent === null) {
++              return;
++            }
++
++            drawVolumeMeter(percent, lastVolumePercent);
++            lastVolumePercent = percent;
++          })
++          .fail(function() {
++          });
++      }
++
++      function pauseVolumePolling() {
++        if (volumePollInterval) {
++          clearInterval(volumePollInterval);
++          volumePollInterval = null;
++        }
++      }
++
++      function resumeVolumePolling() {
++        pauseVolumePolling();
++        volumePollInterval = setInterval(function() {
++          refreshRealVolumeMeter();
++        }, 2500);
++      }
++
++      function runVolumeSyncSequence() {
++        var delays = [90, 180, 300, 460];
++        var stepIndex = 0;
++
++        function nextStep() {
++          if (stepIndex >= delays.length) {
++            volumeActionInProgress = false;
++            refreshRealVolumeMeter({ force: true });
++            resumeVolumePolling();
++            return;
++          }
++
++          setTimeout(function() {
++            refreshRealVolumeMeter({ force: true });
++            stepIndex++;
++            nextStep();
++          }, delays[stepIndex]);
++        }
++
++        nextStep();
++      }
++
++      function initialize_real_volume_meter() {
++        buildVolumeMeter();
++        drawVolumeMeter(0, null);
++        refreshRealVolumeMeter({ force: true });
++        resumeVolumePolling();
++
++        $('button[action="volume_up"], button[action="volume_down"]')
++          .off('click.volumeMeter')
++          .on('click.volumeMeter', function() {
++            pauseVolumePolling();
++
++            if (volumeActionInProgress) {
++              return;
++            }
++
++            volumeActionInProgress = true;
++            runVolumeSyncSequence();
++          });
++      }
++
++      $(function() {
++        initialize_real_volume_meter();
++      });
++    </script>
++
++    <!-- Bootstrap & existing JS -->
++    <script src="/lib/bootstrap-5/js/bootstrap.bundle.min.js"></script>
++    <script src="/js/top_menu.js"></script>
++    <script src="/js/gate_offline_polling.js"></script>
++    <script src="/js/debug.js"></script>
++  </body>
++</html>
+diff -ruN original/web/js/debug.js upgraded/web/js/debug.js
+--- original/web/js/debug.js	2026-05-14 20:20:25
++++ upgraded/web/js/debug.js	2026-05-06 21:57:02
+@@ -18,7 +18,8 @@
+           url: 'stargate/do/chevron_cycle',
+           data: JSON.stringify({
+               chevron_number: chevron_number
+-          })
++          }),
++          contentType: 'application/json'
+       })
+       .fail(function() {
+           console.log("Failed to communicate with Stargate")
+@@ -29,12 +30,25 @@
+   $('.debug_button_container .controlButton').click(function() {
+       const action = $(this).attr('action');
+ 
+-      $.post({
++      // Default: no body
++      let payload = null;
++
++      // If this is Incoming simulation, read checkbox and send JSON
++      if (action === "simulate_incoming") {
++        const cb = document.getElementById("incomingExtended");
++        const extended = cb ? cb.checked : false;
++        payload = JSON.stringify({ extended: extended });
++      }
++
++      $.ajax({
+           url: 'stargate/do/' + action,
++          type: 'POST',
++          data: payload,
++          contentType: payload ? 'application/json' : undefined
+       })
+       .fail(function() {
+           console.log("Failed to communicate with Stargate")
+           $("<div>Failed to communicate with Stargate</div>").dialog();
+       });
+   });
+-}
++}
+\ No newline at end of file
