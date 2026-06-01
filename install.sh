@@ -40,10 +40,12 @@ from pathlib import Path
 target = Path(sys.argv[1])
 
 def read(p):
-    return p.read_text(encoding="utf-8", errors="ignore")
+    with p.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+        return handle.read()
 
 def write(p, s):
-    p.write_text(s, encoding="utf-8")
+    with p.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(s)
 
 # keyboard_manager.py
 km = target / "classes/keyboard_manager.py"
@@ -52,11 +54,17 @@ s = read(km)
 if "self.dhd_test_enable" not in s:
     marker = "self.symbol_manager = stargate.symbol_manager"
     if marker in s:
-        s = s.replace(marker, marker + "\n\n        self.dhd_test_enable = False\n        self.dhd_test_active_buttons = []", 1)
+        s = s.replace(marker, marker + """
+
+        # DHD TEST OVERLAY VARS START
+        self.dhd_test_enable = False
+        self.dhd_test_active_buttons = []
+        # DHD TEST OVERLAY VARS END""", 1)
     else:
         print("WARNING: Could not inject DHD test vars into keyboard_manager.py")
 
 methods = """
+    # DHD TEST OVERLAY METHODS START
     def enable_dhd_test(self, enable):
         if enable:
             try:
@@ -106,6 +114,7 @@ methods = """
         except Exception as exc:
             self.log.log(f"DHD Test: LED error for symbol {symbol_number}: {exc}")
 
+    # DHD TEST OVERLAY METHODS END
 """
 
 if "def handle_dhd_test" not in s:
@@ -118,7 +127,7 @@ if "def handle_dhd_test" not in s:
 if "if self.dhd_test_enable:" not in s:
     s = re.sub(
         r'(    def keypress_handler\( self, key \):[\s\S]*?"""\s*\n)',
-        r'\1\n        if getattr(self, "dhd_test_enable", False):\n            self.handle_dhd_test(key)\n            return\n',
+        r'\1\n        # DHD TEST OVERLAY KEYPRESS START\n        if getattr(self, "dhd_test_enable", False):\n            self.handle_dhd_test(key)\n            return\n        # DHD TEST OVERLAY KEYPRESS END\n',
         s,
         count=1
     )
@@ -131,6 +140,7 @@ ws = target / "classes/web_server.py"
 s = read(ws)
 
 endpoint = """
+            # DHD TEST OVERLAY LED ENDPOINT START
             elif self.path == "/do/dhd_led_test":
                 try:
                     dhd = getattr(self.stargate.dialer, "hardware", None)
@@ -162,6 +172,7 @@ endpoint = """
                 except Exception as exc:
                     self.stargate.log.log(f"DHD LED TEST ERROR: {exc}")
                     data = {"success": False, "message": str(exc)}
+            # DHD TEST OVERLAY LED ENDPOINT END
 
 """
 
@@ -176,6 +187,7 @@ if "/do/dhd_led_test" not in s:
         print("WARNING: Could not insert /do/dhd_led_test endpoint")
 
 enable_block = """
+            # DHD TEST OVERLAY ENABLE ENDPOINTS START
             elif self.path == "/do/dhd_test_enable":
                 try:
                     self.stargate.keyboard.enable_dhd_test(True)
@@ -191,6 +203,7 @@ enable_block = """
                 except Exception as exc:
                     self.stargate.log.log(f"DHD TEST DISABLE ERROR: {exc}")
                     data = {"success": False, "message": str(exc)}
+            # DHD TEST OVERLAY ENABLE ENDPOINTS END
 
 """
 
@@ -212,8 +225,9 @@ dh = target / "web/debug.htm"
 s = read(dh)
 
 s = re.sub(
-    r'\n\s*<!-- DHD LED TEST UNIVERSAL PATCH START -->.*?<!-- DHD LED TEST UNIVERSAL PATCH END -->\s*\n',
-    '\n',
+    r'[ \t]*<!-- DHD LED TEST UNIVERSAL PATCH START -->.*?'
+    r'<!-- DHD LED TEST UNIVERSAL PATCH END -->\r?\n?',
+    '',
     s,
     flags=re.S
 )
@@ -290,10 +304,18 @@ script = """
 <!-- DHD LED TEST UNIVERSAL PATCH END -->
 """
 
-if "</body>" in s:
-    s = s.replace("</body>", script + "\n</body>", 1)
+newline = "\r\n" if "\r\n" in s else "\n"
+script = script.strip("\n").replace("\n", newline)
+
+if re.search(r"(?m)^[ \t]*</body>", s):
+    s = re.sub(
+        r"(?m)^[ \t]*</body>",
+        lambda match: script + newline + match.group(0),
+        s,
+        count=1,
+    )
 else:
-    s += script
+    s += newline + script + newline
 
 write(dh, s)
 print("Patched:", dh)
@@ -309,4 +331,5 @@ python3 -m py_compile \
 
 echo "=== Done ==="
 echo "Restart with: sudo systemctl restart stargate.service"
-echo "Restore backup with: sudo rsync -a --delete $BACKUP/ $TARGET/"
+echo "Surgical restore with: sudo ./restore.sh $TARGET"
+echo "Emergency full backup restore with: sudo rsync -a --delete $BACKUP/ $TARGET/"
