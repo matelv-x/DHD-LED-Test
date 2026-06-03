@@ -4,8 +4,6 @@ DHD LED Test is a standalone add-on for the
 [StargateProject-software](https://github.com/jonnerd154/StargateProject-software)
 project by jonnerd154.
 
-This repository is private while it is being checked and verified.
-
 ## What it does
 
 DHD LED Test provides the ability to test the DHD LEDs using seven different
@@ -24,7 +22,7 @@ the image provided by the project author.
 
 ## Install
 
-Clone or unzip this add-on into `/home/pi`, then run:
+Method — GitHub Clone (Recommended)
 
 ```bash
 cd /home/pi
@@ -59,10 +57,4 @@ sudo systemctl restart stargate.service
 
 Author: matelv-x.
 
-DHD LED Test is an original standalone add-on created by matelv-x.
-
-No feature, behavior, modification, or implementation in this add-on was copied
-or derived from another add-on idea.
-
-This add-on is designed to work with the StargateProject-software project, but
-it remains a separate matelv-x add-on.
+This add-on is designed to work with the StargateProject-software project.
