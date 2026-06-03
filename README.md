@@ -26,9 +26,9 @@ Method — GitHub Clone (Recommended)
 
 ```bash
 cd /home/pi
-rm -rf DHD-Test
-git clone https://github.com/matelv-x/DHD-Test.git
-cd DHD-Test
+rm -rf DHD-LED-Test
+git clone https://github.com/matelv-x/DHD-LED-Test.git
+cd DHD-LED-Test
 chmod +x install.sh restore.sh
 sudo ./install.sh /home/pi/sg1_v4
 sudo systemctl restart stargate.service
@@ -37,7 +37,7 @@ sudo systemctl restart stargate.service
 ## Restore / uninstall
 
 ```bash
-cd /home/pi/DHD-Test
+cd /home/pi/DHD-LED-Test
 chmod +x restore.sh
 sudo ./restore.sh /home/pi/sg1_v4
 sudo systemctl restart stargate.service
