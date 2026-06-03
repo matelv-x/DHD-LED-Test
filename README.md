@@ -57,10 +57,12 @@ sudo systemctl restart stargate.service
 
 ## Attribution and originality
 
-Original base project: StargateProject SG1 software by jonnerd154:
-https://github.com/jonnerd154/StargateProject-software
+Author: matelv-x.
 
-Additional source/idea credit: DHD behavior comes from the original
-StargateProject hardware/software lineage; add-on packaging by matelv-x/Codex.
+DHD LED Test is an original standalone add-on created by matelv-x.
 
-How much is copied or changed: Small helper package.
+No feature, behavior, modification, or implementation in this add-on was copied
+or derived from another add-on idea.
+
+This add-on is designed to work with the StargateProject-software project, but
+it remains a separate matelv-x add-on.
