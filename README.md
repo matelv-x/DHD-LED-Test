@@ -26,7 +26,7 @@ Method — GitHub Clone (Recommended)
 
 ```bash
 cd /home/pi
-rm -rf DHD-LED-Test
+rm -rf DHD-Test DHD-LED-Test DHD-LED-Test-main
 git clone https://github.com/matelv-x/DHD-LED-Test.git
 cd DHD-LED-Test
 chmod +x install.sh restore.sh
