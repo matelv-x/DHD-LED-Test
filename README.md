@@ -55,7 +55,7 @@ sudo systemctl restart stargate.service
 - Creates a full SG1 backup before installation and before surgical restore.
 - Installer targets `/home/pi/sg1_v4`.
 
-## Attribution and originality
+## Attribution and originality,
 
 Author: matelv-x.
 
