@@ -1,5 +1,7 @@
 # DHD LED Test
 
+[![Downloads](https://img.shields.io/github/downloads/matelv-x/DHD-LED-Test/total?label=downloads)](https://github.com/matelv-x/DHD-LED-Test/releases)
+
 DHD LED Test is a standalone add-on for the
 [StargateProject-software](https://github.com/jonnerd154/StargateProject-software)
 project by jonnerd154.
