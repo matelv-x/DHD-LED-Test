@@ -258,7 +258,13 @@ script = """
       contentType: 'application/json'
     })
     .done(function(response) {
-      $("<div>DHD LED test '" + mode + "' started. Check logs.</div>").dialog();
+      var $startedDialog = $("<div>DHD LED test '" + mode + "' started. Check logs.</div>").dialog({
+        modal: false
+      });
+      setTimeout(function() {
+        $startedDialog.dialog('close');
+        $startedDialog.remove();
+      }, 2000);
     })
     .fail(function() {
       $("<div>Failed to start DHD LED test.</div>").dialog();
