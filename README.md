@@ -1,5 +1,10 @@
 # DHD LED Test
 
+## Stellar Archive maintenance
+
+This repository includes maintenance contract v1. Its marked hooks and owned
+test files support a surgical uninstall from Stellar Archive.
+
 [![Downloads](https://img.shields.io/github/downloads/matelv-x/DHD-LED-Test/total?label=downloads)](https://github.com/matelv-x/DHD-LED-Test/releases)
 
 DHD LED Test is a standalone add-on for the

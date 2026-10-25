@@ -1,0 +1,11 @@
+{
+  "maintenance_contract": 1,
+  "id": "dhd-led-test",
+  "name": "DHD LED Test",
+  "repository": "matelv-x/DHD-LED-Test",
+  "platforms": ["v4"],
+  "detect": {"any": [{"path": "test/dhd_test_from_config.py"}, {"path": "web/debug.htm", "contains": "DHD LED TEST UNIVERSAL PATCH START"}]},
+  "install": {"argv": ["./install.sh", "{sg1_root}"], "timeout": 1200},
+  "uninstall": {"argv": ["./restore.sh", "{sg1_root}"], "timeout": 900},
+  "restart_required": true
+}
