@@ -18,12 +18,6 @@ if [[ ! -d "$TARGET" ]]; then
   exit 1
 fi
 
-BACKUP="${TARGET}_backup_before_dhd_test_restore_$(date +%Y%m%d_%H%M%S)"
-
-echo "=== Creating safety backup ==="
-cp -a "$TARGET" "$BACKUP"
-echo "Backup created: $BACKUP"
-
 echo "=== Removing DHD test hooks ==="
 python3 - "$TARGET" <<'PY'
 import re
@@ -130,6 +124,8 @@ echo "=== Syntax check ==="
 python3 -m py_compile \
   "$TARGET/classes/keyboard_manager.py" \
   "$TARGET/classes/web_server.py"
+
+rm -rf -- "$TARGET/.dhd-led-test-addon"
 
 echo "=== DHD TEST RESTORE COMPLETE ==="
 echo "Restart with: sudo systemctl restart stargate.service"

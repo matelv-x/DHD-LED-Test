@@ -19,11 +19,41 @@ if [[ ! -d "$TARGET" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKUP="${TARGET}_backup_dhd_test_universal_$(date +%Y%m%d_%H%M%S)"
+STATE_DIR="$TARGET/.dhd-led-test-addon"
+PREINSTALL_STATE="$STATE_DIR/preinstall"
+TRANSACTION_STATE="$STATE_DIR/transaction"
+COMPACT_STATE="$SCRIPT_DIR/scripts/compact_state.py"
+SNAPSHOT_PATHS=(
+  classes/keyboard_manager.py
+  classes/web_server.py
+  web/debug.htm
+  test/__init__.py
+  test/dhd_test.py
+  test/dhd_test_from_config.py
+)
 
-echo "=== Creating backup ==="
-cp -a "$TARGET" "$BACKUP"
-echo "Backup created: $BACKUP"
+LEGACY_SOURCE="$TARGET"
+shopt -s nullglob
+LEGACY_BACKUPS=("${TARGET}"_backup_dhd_test_universal_*)
+shopt -u nullglob
+if (( ${#LEGACY_BACKUPS[@]} > 0 )) && [[ -d "${LEGACY_BACKUPS[0]}" ]]; then
+  LEGACY_SOURCE="${LEGACY_BACKUPS[0]}"
+  echo "Migrating compact pre-install state from legacy backup: $LEGACY_SOURCE"
+fi
+python3 "$COMPACT_STATE" capture --once --state "$PREINSTALL_STATE" \
+  --root "$TARGET" --source "$LEGACY_SOURCE" "${SNAPSHOT_PATHS[@]}"
+python3 "$COMPACT_STATE" capture --state "$TRANSACTION_STATE" \
+  --root "$TARGET" "${SNAPSHOT_PATHS[@]}"
+
+rollback_install() {
+  local result=$?
+  trap - ERR
+  echo "ERROR: installation failed; restoring compact transaction snapshot" >&2
+  python3 "$COMPACT_STATE" restore --state "$TRANSACTION_STATE" --root "$TARGET" || true
+  rm -rf -- "$TRANSACTION_STATE"
+  exit "$result"
+}
+trap rollback_install ERR
 
 echo "=== Installing DHD test files ==="
 mkdir -p "$TARGET/test"
@@ -335,7 +365,10 @@ python3 -m py_compile \
   "$TARGET/test/dhd_test.py" \
   "$TARGET/test/dhd_test_from_config.py"
 
+rm -rf -- "$TRANSACTION_STATE"
+trap - ERR
+
 echo "=== Done ==="
 echo "Restart with: sudo systemctl restart stargate.service"
 echo "Surgical restore with: sudo ./restore.sh $TARGET"
-echo "Emergency full backup restore with: sudo rsync -a --delete $BACKUP/ $TARGET/"
+echo "Compact pre-install state: $PREINSTALL_STATE"
